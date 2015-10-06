@@ -50,6 +50,7 @@ class BufferController {
       this.video.removeEventListener('seeking', this.onvseeking);
       this.video.removeEventListener('seeked', this.onvseeked);
       this.video.removeEventListener('loadedmetadata', this.onvmetadata);
+      this.video.removeEventListener('ended', this.onvended);
       this.onvseeking = this.onvseeked = this.onvmetadata = null;
     }
     this.state = this.IDLE;
@@ -518,11 +519,14 @@ class BufferController {
         }
         // if stream is VOD (not live) and we reach End of Stream
         var level = this.levels[this.level];
-        if (level && level.details && !level.details.live && (this.video.duration - currentTime) < 0.2) {
-          if (this.mediaSource && this.mediaSource.readyState === 'open') {
-            logger.log('end of VoD stream reached, signal endOfStream() to MediaSource');
-            this.startPosition = this.lastCurrentTime = 0;
-            this.mediaSource.endOfStream();
+        if (level && level.details && !level.details.live) {
+          // are we playing last fragment ?
+          if (rangeCurrent.frag.sn === level.details.endSN) {
+            if (this.mediaSource && this.mediaSource.readyState === 'open') {
+              logger.log('all media data available, signal endOfStream() to MediaSource');
+              //Notify the media element that it now has all of the media data
+              this.mediaSource.endOfStream();
+            }
           }
         }
       }
@@ -685,9 +689,11 @@ class BufferController {
     this.onvseeking = this.onVideoSeeking.bind(this);
     this.onvseeked = this.onVideoSeeked.bind(this);
     this.onvmetadata = this.onVideoMetadata.bind(this);
+    this.onvended = this.onVideoEnded.bind(this);
     this.video.addEventListener('seeking', this.onvseeking);
     this.video.addEventListener('seeked', this.onvseeked);
     this.video.addEventListener('loadedmetadata', this.onvmetadata);
+    this.video.addEventListener('ended', this.onvended);
     if(this.levels && this.config.autoStartLoad) {
       this.startLoad();
     }
@@ -734,6 +740,13 @@ class BufferController {
     this.loadedmetadata = true;
     this.tick();
   }
+
+  onVideoEnded() {
+    logger.log('video ended');
+    // reset startPosition and lastCurrentTime to restart playback @ stream beginning
+    this.startPosition = this.lastCurrentTime = 0;
+  }
+
 
   onManifestParsed(event, data) {
     var aac = false, heaac = false, codecs;
@@ -798,9 +811,9 @@ class BufferController {
     newLevel.details = newLevelDetails;
     newLevel.details.sliding = sliding;
     if (this.startLevelLoaded === false) {
-      // if live playlist, set start position to be fragment N-3
+      // if live playlist, set start position to be fragment N-this.config.liveSyncDurationCount (usually 3)
       if (newLevelDetails.live) {
-        this.startPosition = Math.max(0, duration - 3 * newLevelDetails.targetduration);
+        this.startPosition = Math.max(0, duration - this.config.liveSyncDurationCount * newLevelDetails.targetduration);
       }
       this.nextLoadPosition = this.startPosition;
       this.startLevelLoaded = true;
@@ -952,6 +965,7 @@ class BufferController {
       if (this.frag) {
         this.stats.tbuffered = new Date();
         observer.trigger(Event.FRAG_BUFFERED, {stats: this.stats, frag: this.frag});
+        logger.log(`video buffered : ${this.timeRangesToString(this.video.buffered)}`);
         this.state = this.IDLE;
       }
     }
@@ -963,7 +977,14 @@ class BufferController {
     this.state = this.ERROR;
     observer.trigger(Event.ERROR, {type: ErrorTypes.MEDIA_ERROR, details: ErrorDetails.FRAG_APPENDING_ERROR, fatal: true, frag: this.frag});
   }
-}
 
+  timeRangesToString(r) {
+    var log = '', len = r.length;
+    for (var i=0; i<len; i++) {
+      log += '[' + r.start(i) + ',' + r.end(i) + ']';
+    }
+    return log;
+  }
+}
 export default BufferController;
 
