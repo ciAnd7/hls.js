@@ -38,8 +38,11 @@ design idea is pretty simple :
   - [src/controller/fps-controller.js][]
     - in charge of monitoring frame rate, and fire FPS_DROP event in case FPS drop exceeds configured threshold. disabled for now.
   - [src/controller/level-controller.js][]
-    - in charge of scheduling playlist (re)loading, monitoring fragment loading bitrate, and determining auto quality level.
+    - in charge of scheduling playlist (re)loading and monitoring of fragment loading bitrate
     - a timer is armed to periodically refresh active live playlist.
+
+  - [src/controller/abr-controller.js][]
+    - in charge of determining auto quality level.
     - auto quality switch algorithm is pretty naive and simple ATM and similar to the one that could be found in google [StageFright](https://android.googlesource.com/platform/frameworks/av/+/master/media/libstagefright/httplive/LiveSession.cpp)
 
   - [src/demux/demuxer.js][]
@@ -83,6 +86,7 @@ design idea is pretty simple :
 [src/errors.js]: src/errors.js
 [src/stats.js]: src/stats.js
 [src/observer.js]: src/observer.js
+[src/controller/abr-controller.js]: src/controller/abr-controller.js
 [src/controller/buffer-controller.js]: src/controller/buffer-controller.js
 [src/controller/level-controller.js]: src/controller/level-controller.js
 [src/controller/fps-controller.js]: src/controller/fps-controller.js
