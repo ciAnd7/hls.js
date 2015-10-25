@@ -8,15 +8,13 @@ design idea is pretty simple :
 ##code structure
 
   - [src/hls.js][]
-    - definition of Hls Class. instantiate all subcomponents, upon instantiation of an Hls object.
+    - definition of Hls Class. instantiate all subcomponents.
   - [src/events.js][]
     - definition of Hls.Events
   - [src/errors.js][]
     - definition of Hls.ErrorTypes and Hls.ErrorDetails
   - [src/stats.js][]
     - subsystem monitoring events, and aggregating them into an object, that could be retrieved through hls.stats getter
-  - [src/observer.js][]
-    -  abstracts [events.EventEmitter()](https://nodejs.org/api/events.html#events_class_events_eventemitter) class, used for event dispatching.
 
   - [src/controller/buffer-controller.js][]
     - in charge of:
@@ -56,22 +54,34 @@ design idea is pretty simple :
   - [src/demux/exp-golomb.js][]
     - utility class to extract Exponential-Golomb coded data. needed by TS demuxer for SPS parsing.
   - [src/demux/tsdemuxer.js][]
-    - highly optimized TS demuxer, convert TS packet into ISO BMFF (MP4) boxes, notify demuxing completion using events.
-     - this demuxer is able to deal with small gaps between fragments and ensure timestamp continuity.
+    - highly optimized TS demuxer:
+     - parse PAT, PMT
+     - extract PES packet from audio and video PIDs
+     - extract AVC/H264 NAL units and AAC/ADTS samples from PES packet
+     - trigger the remuxer upon parsing completion
      - it also tries to workaround as best as it can audio codec switch (HE-AAC to AAC and vice versa), without having to restart the MediaSource.
+     - it also controls the remuxing process : 
+      - upon discontinuity or level switch detection, it will also notifies the remuxer so that it can reset its state.
   - [src/demux/tsdemuxerworker.js][]
     - TS demuxer web worker. 
     - listen to worker message, and trigger tsdemuxer upon reception of TS fragments.
     - provides MP4 Boxes back to main thread using [transferable objects](https://developers.google.com/web/updates/2011/12/Transferable-Objects-Lightning-Fast) in order to minimize message passing overhead.
+  - [src/helper/level-helper.js][]
+    - helper class providing methods dealing with playlist sliding and fragment duration drift computation : after fragment parsing, start/end fragment timestamp will be used to adjust potential playlist drifts and live playlist sliding.
   - [src/loader/fragment-loader.js][]
     - in charge of loading fragments, use xhr-loader if not overrided by user config
   - [src/loader/playlist-loader.js][]
    - in charge of loading manifest, and level playlists, use xhr-loader if not overrided by user config.
+  - [src/remux/dummy-remuxer.js][]
+   - example dummy remuxer
   - [src/remux/mp4-generator.js][]
-   - in charge of converting AVC/AAC samples in MP4 boxes
+   - in charge of generating MP4 boxes
      - generate Init Segment (moov)
      - generate samples Box (moof and mdat)
-
+  - [src/remux/mp4-remuxer.js][]
+   - in charge of converting AVC/AAC samples provided by demuxer into fragmented ISO BMFF boxes, compatible with MediaSource
+   - this remuxer is able to deal with small gaps between fragments and ensure timestamp continuity.
+   - it notifies remuxing completion using events (```FRAG_PARSING_INIT_SEGMENT```and ```FRAG_PARSING_DATA```)
   - [src/utils/hex.js][]
     - Hex dump utils, useful for debug
   - [src/utils/logger.js][]
@@ -85,7 +95,6 @@ design idea is pretty simple :
 [src/events.js]: src/events.js
 [src/errors.js]: src/errors.js
 [src/stats.js]: src/stats.js
-[src/observer.js]: src/observer.js
 [src/controller/abr-controller.js]: src/controller/abr-controller.js
 [src/controller/buffer-controller.js]: src/controller/buffer-controller.js
 [src/controller/level-controller.js]: src/controller/level-controller.js
@@ -95,9 +104,12 @@ design idea is pretty simple :
 [src/demux/exp-golomb.js]: src/demux/exp-golomb.js
 [src/demux/tsdemuxer.js]: src/demux/tsdemuxer.js
 [src/demux/tsdemuxerworker.js]: src/demux/tsdemuxerworker.js
+[src/helper/level-helper.js]: src/helper/level-helper.js
 [src/loader/fragment-loader.js]: src/loader/fragment-loader.js
 [src/loader/playlist-loader.js]: src/loader/playlist-loader.js
+[src/remux/dummy-remuxer.js]: src/remux/dummy-remuxer.js
 [src/remux/mp4-generator.js]: src/remux/mp4-generator.js
+[src/remux/mp4-remuxer.js]: src/remux/mp4-remuxer.js
 [src/utils/hex.js]: src/utils/hex.js
 [src/utils/logger.js]: src/utils/logger.js
 [src/utils/xhr-loader.js]: src/utils/xhr-loader.js

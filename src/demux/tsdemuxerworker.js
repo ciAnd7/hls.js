@@ -1,17 +1,27 @@
  import Event from '../events';
+ import EventEmitter from 'events';
  import TSDemuxer from '../demux/tsdemuxer';
- import observer from '../observer';
+ import MP4Remuxer from '../remux/mp4-remuxer';
 
 var TSDemuxerWorker = function (self) {
+  // observer setup
+  var observer = new EventEmitter();
+  observer.trigger = function trigger (event, ...data) {
+    observer.emit(event, event, ...data);
+  };
+
+  observer.off = function off (event, ...data) {
+    observer.removeListener(event, ...data);
+  };
   self.addEventListener('message', function (ev) {
     //console.log('demuxer cmd:' + ev.data.cmd);
     switch (ev.data.cmd) {
       case 'init':
-        self.demuxer = new TSDemuxer();
+        self.demuxer = new TSDemuxer(observer,MP4Remuxer);
         break;
       case 'demux':
         self.demuxer.push(new Uint8Array(ev.data.data), ev.data.audioCodec, ev.data.videoCodec, ev.data.timeOffset, ev.data.cc, ev.data.level, ev.data.duration);
-        self.demuxer.end();
+        self.demuxer.remux();
         break;
       default:
         break;
@@ -51,6 +61,11 @@ var TSDemuxerWorker = function (self) {
 
   observer.on(Event.ERROR, function(event, data) {
     self.postMessage({event: event, data: data});
+  });
+
+  observer.on(Event.FRAG_PARSING_METADATA, function(event, data) {
+    var objData = {event: event, samples: data.samples};
+    self.postMessage(objData);
   });
 };
 
