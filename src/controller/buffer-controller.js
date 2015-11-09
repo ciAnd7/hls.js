@@ -21,13 +21,13 @@ class BufferController {
     this.APPENDING = 5;
     this.BUFFER_FLUSHING = 6;
     this.config = hls.config;
-    this.startPosition = 0;
     this.hls = hls;
     // Source Buffer listeners
     this.onsbue = this.onSBUpdateEnd.bind(this);
     this.onsbe  = this.onSBUpdateError.bind(this);
     // internal listeners
     this.onmse = this.onMSEAttached.bind(this);
+    this.onmsed0 = this.onMSEDetaching.bind(this);
     this.onmsed = this.onMSEDetached.bind(this);
     this.onmp = this.onManifestParsed.bind(this);
     this.onll = this.onLevelLoaded.bind(this);
@@ -38,13 +38,18 @@ class BufferController {
     this.onerr = this.onError.bind(this);
     this.ontick = this.tick.bind(this);
     hls.on(Event.MSE_ATTACHED, this.onmse);
+    hls.on(Event.MSE_DETACHING, this.onmsed0);
     hls.on(Event.MSE_DETACHED, this.onmsed);
     hls.on(Event.MANIFEST_PARSED, this.onmp);
   }
 
   destroy() {
     this.stop();
-    this.hls.off(Event.MANIFEST_PARSED, this.onmp);
+    var hls = this.hls;
+    hls.off(Event.MSE_ATTACHED, this.onmse);
+    hls.off(Event.MSE_DETACHING, this.onmsed0);
+    hls.off(Event.MSE_DETACHED, this.onmsed);
+    hls.off(Event.MANIFEST_PARSED, this.onmp);
     this.state = this.IDLE;
   }
 
@@ -53,16 +58,16 @@ class BufferController {
       this.startInternal();
       if (this.lastCurrentTime) {
         logger.log(`seeking @ ${this.lastCurrentTime}`);
-        this.nextLoadPosition = this.startPosition = this.lastCurrentTime;
         if (!this.lastPaused) {
           logger.log('resuming video');
           this.video.play();
         }
         this.state = this.IDLE;
       } else {
-        this.nextLoadPosition = this.startPosition;
+        this.lastCurrentTime = 0;
         this.state = this.STARTING;
       }
+      this.nextLoadPosition = this.startPosition = this.lastCurrentTime;
       this.tick();
     } else {
       logger.warn('cannot start loading as either manifest not parsed or video not attached');
@@ -499,9 +504,18 @@ class BufferController {
   }
 
   _checkFragmentChanged() {
-    var rangeCurrent, currentTime;
-    if (this.video && this.video.seeking === false) {
-      this.lastCurrentTime = currentTime = this.video.currentTime;
+    var rangeCurrent, currentTime, video = this.video;
+    if (video && video.seeking === false) {
+      currentTime = video.currentTime;
+      /* if video element is in seeked state, currentTime can only increase.
+        (assuming that playback rate is positive ...)
+        As sometimes currentTime jumps back to zero after a
+        media decode error, check this, to avoid seeking back to
+        wrong position after a media decode error
+      */
+      if(currentTime > video.playbackRate*this.lastCurrentTime) {
+        this.lastCurrentTime = currentTime;
+      }
       if (this.isBuffered(currentTime)) {
         rangeCurrent = this.getBufferRange(currentTime);
       } else if (this.isBuffered(currentTime + 0.1)) {
@@ -523,10 +537,11 @@ class BufferController {
         if (levelDetails && !levelDetails.live) {
           // are we playing last fragment ?
           if (fragPlaying.sn === levelDetails.endSN) {
-            if (this.mediaSource && this.mediaSource.readyState === 'open') {
+            var mediaSource = this.mediaSource;
+            if (mediaSource && mediaSource.readyState === 'open') {
               logger.log('all media data available, signal endOfStream() to MediaSource');
               //Notify the media element that it now has all of the media data
-              this.mediaSource.endOfStream();
+              mediaSource.endOfStream();
             }
           }
         }
@@ -686,28 +701,38 @@ class BufferController {
   }
 
   onMSEAttached(event, data) {
-    this.video = data.video;
+    var video = data.video;
+    this.video = video;
     this.mediaSource = data.mediaSource;
     this.onvseeking = this.onVideoSeeking.bind(this);
     this.onvseeked = this.onVideoSeeked.bind(this);
     this.onvmetadata = this.onVideoMetadata.bind(this);
     this.onvended = this.onVideoEnded.bind(this);
-    this.video.addEventListener('seeking', this.onvseeking);
-    this.video.addEventListener('seeked', this.onvseeked);
-    this.video.addEventListener('loadedmetadata', this.onvmetadata);
-    this.video.addEventListener('ended', this.onvended);
+    video.addEventListener('seeking', this.onvseeking);
+    video.addEventListener('seeked', this.onvseeked);
+    video.addEventListener('loadedmetadata', this.onvmetadata);
+    video.addEventListener('ended', this.onvended);
     if(this.levels && this.config.autoStartLoad) {
       this.startLoad();
     }
   }
 
+  onMSEDetaching() {
+    var video = this.video;
+    if (video && video.ended) {
+      logger.log('MSE detaching and video ended, reset startPosition');
+      this.startPosition = this.lastCurrentTime = 0;
+    }
+  }
+
   onMSEDetached() {
     // remove video listeners
-    if (this.video) {
-      this.video.removeEventListener('seeking', this.onvseeking);
-      this.video.removeEventListener('seeked', this.onvseeked);
-      this.video.removeEventListener('loadedmetadata', this.onvmetadata);
-      this.video.removeEventListener('ended', this.onvended);
+    var video = this.video;
+    if (video) {
+      video.removeEventListener('seeking', this.onvseeking);
+      video.removeEventListener('seeked', this.onvseeked);
+      video.removeEventListener('loadedmetadata', this.onvmetadata);
+      video.removeEventListener('ended', this.onvended);
       this.onvseeking = this.onvseeked = this.onvmetadata = null;
     }
     this.video = null;
@@ -812,6 +837,7 @@ class BufferController {
     }
     // override level info
     curLevel.details = newDetails;
+    this.hls.trigger(Event.LEVEL_UPDATED, { details: newDetails, level: newLevelId });
 
     // compute start position
     if (this.startLevelLoaded === false) {
@@ -907,7 +933,9 @@ class BufferController {
       var level = this.levels[this.level],
           frag = this.fragCurrent;
       logger.log(`parsed data, type/startPTS/endPTS/startDTS/endDTS/nb:${data.type}/${data.startPTS.toFixed(3)}/${data.endPTS.toFixed(3)}/${data.startDTS.toFixed(3)}/${data.endDTS.toFixed(3)}/${data.nb}`);
-      LevelHelper.updateFragPTS(level.details,frag.sn,data.startPTS,data.endPTS);
+      var drift = LevelHelper.updateFragPTS(level.details,frag.sn,data.startPTS,data.endPTS);
+      this.hls.trigger(Event.LEVEL_PTS_UPDATED, {details: level.details, level: this.level, drift: drift});
+
       this.mp4segments.push({type: data.type, data: data.moof});
       this.mp4segments.push({type: data.type, data: data.mdat});
       this.nextLoadPosition = data.endPTS;

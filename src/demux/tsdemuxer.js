@@ -1,7 +1,12 @@
 /**
- * A stream-based mp2ts to mp4 converter. This utility is used to
- * deliver mp4s to a SourceBuffer on platforms that support native
- * Media Source Extensions.
+ * highly optimized TS demuxer:
+ * parse PAT, PMT
+ * extract PES packet from audio and video PIDs
+ * extract AVC/H264 NAL units and AAC/ADTS samples from PES packet
+ * trigger the remuxer upon parsing completion
+ * it also tries to workaround as best as it can audio codec switch (HE-AAC to AAC and vice versa), without having to restart the MediaSource.
+ * it also controls the remuxing process :
+ * upon discontinuity or level switch detection, it will also notifies the remuxer so that it can reset its state.
 */
 
  import Event from '../events';
@@ -17,7 +22,16 @@
     this.remuxerClass = remuxerClass;
     this.lastCC = 0;
     this.PES_TIMESCALE = 90000;
-    this.remuxer = new this.remuxerClass(this.observer);
+    this.remuxer = new this.remuxerClass(observer);
+  }
+
+  static probe(data) {
+    // a TS fragment should contain at least 3 TS packets, a PAT, a PMT, and one PID, each starting with 0x47
+    if (data.length >= 3*188 && data[0] === 0x47 && data[188] === 0x47 && data[2*188] === 0x47) {
+      return true;
+    } else {
+      return false;
+    }
   }
 
   switchLevel() {
@@ -263,25 +277,24 @@
     }
     //free pes.data to save up some memory
     pes.data = null;
+    //var debugString = '';
     units.units.forEach(unit => {
       switch(unit.type) {
         //NDR
-        case 1:
-          // check if slice_type matches with a keyframe
-          var sliceType = new ExpGolomb(unit.data).readSliceType();
-          if(sliceType === 2 || // I-slice
-             sliceType === 4 || // SI-slice
-             sliceType === 7 || // I-slice
-             sliceType === 9) { // SI-slice
-            key = true;
-          }
-          break;
+        // case 1:
+        //   debugString += 'NDR ';
+        //   break;
         //IDR
         case 5:
+          //debugString += 'IDR ';
           key = true;
           break;
+        //case 6:
+        //  debugString += 'SEI ';
+        //  break;
         //SPS
         case 7:
+          //debugString += 'SPS ';
           if(!track.sps) {
             var expGolombDecoder = new ExpGolomb(unit.data);
             var config = expGolombDecoder.readSPS();
@@ -307,14 +320,18 @@
           break;
         //PPS
         case 8:
+          //debugString += 'PPS ';
           if (!track.pps) {
             track.pps = [unit.data];
           }
           break;
+        //case 9:
+        //  debugString += 'AUD ';
         default:
           break;
       }
     });
+    //logger.log(debugString);
     //build sample from PES
     // Annex B to MP4 conversion to be done
     if (units.length) {

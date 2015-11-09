@@ -234,6 +234,12 @@ class MP4Remuxer {
     this.nextAvcDts = dtsnorm + mp4Sample.duration * pes2mp4ScaleFactor;
     track.len = 0;
     track.nbNalu = 0;
+    if(navigator.userAgent.toLowerCase().indexOf('chrome') > -1) {
+    // chrome workaround, mark first sample as being a Random Access Point to avoid sourcebuffer append issue
+    // https://code.google.com/p/chromium/issues/detail?id=229412
+      samples[0].flags.dependsOn = 2;
+      samples[0].flags.isNonSync = 0;
+    }
     track.samples = samples;
     moof = MP4.moof(track.sequenceNumber++, firstDTS / pes2mp4ScaleFactor, track);
     track.samples = [];
@@ -261,7 +267,7 @@ class MP4Remuxer {
         pts, dts, ptsnorm, dtsnorm,
         samples = [];
     /* concatenate the audio data and construct the mdat in place
-      (need 8 more bytes to fill length and mpdat type) */
+      (need 8 more bytes to fill length and mdat type) */
     mdat = new Uint8Array(track.len + 8);
     view = new DataView(mdat.buffer);
     view.setUint32(0, mdat.byteLength);
@@ -295,12 +301,13 @@ class MP4Remuxer {
             if (delta > 0) {
               logger.log(`AAC:${delta} ms hole between fragments detected,filling it`);
               // set PTS to next PTS, and ensure PTS is greater or equal than last DTS
-              ptsnorm = Math.max(this.nextAacPts, this.lastAacDts);
-              dtsnorm = ptsnorm;
               //logger.log('Audio/PTS/DTS adjusted:' + aacSample.pts + '/' + aacSample.dts);
             } else {
               logger.log(`AAC:${(-delta)} ms overlapping between fragments detected`);
             }
+            // set DTS to next DTS
+            ptsnorm = dtsnorm = this.nextAacPts;
+            logger.log('Audio/PTS/DTS adjusted:' + ptsnorm + '/' + dtsnorm);
           }
           else if (absdelta) {
             // not contiguous timestamp, check if PTS is within acceptable range
@@ -343,7 +350,6 @@ class MP4Remuxer {
     if (samples.length >= 2) {
       mp4Sample.duration = samples[samples.length - 2].duration;
     }
-    this.lastAacDts = dtsnorm;
     // next aac sample PTS should be equal to last sample PTS + duration
     this.nextAacPts = ptsnorm + pes2mp4ScaleFactor * mp4Sample.duration;
     //logger.log('Audio/PTS/PTSend:' + aacSample.pts.toFixed(0) + '/' + this.nextAacDts.toFixed(0));

@@ -396,46 +396,6 @@ however if ```config.autoStartLoad``` is set to ```false```, the following metho
 #### ```hls.startLoad()```
 start/restart playlist/fragment loading. this is only effective if MANIFEST_PARSED event has been triggered and video element has been attached to hls object.
 
-## Analytics
-
-playback session analytics could be retrieved through two means.
-
-### ```hls.stats```
-get : return aggregated playback session stats
-
-```js
-{ 
-  tech : 'hls.js',
-  levelNb : total nb of quality level referenced in Manifest
-  levelStart : first quality level experienced by End User 
-  autoLevelMin : min quality level experienced by End User (in auto mode)
-  autoLevelMax : max quality level experienced by End User (in auto mode)
-  autoLevelAvg : avg quality level experienced by End User (in auto mode)
-  autoLevelLast : last quality level experienced by End User (in auto mode)
-  autoLevelSwitch : nb of quality level switch in auto mode
-  autoLevelCappingMin : min auto quality level capping value
-  autoLevelCappingMax : max auto quality level capping value
-  autoLevelCappingLast : last auto quality level capping value
-  manualLevelMin : min quality level experienced by End User (in manual mode)
-  manualLevelMax : max quality level experienced by End User (in manual mode)
-  manualLevelLast : last quality level experienced by End User (in manual mode)  
-  manualLevelSwitch : nb of quality level switch in manual mode
-  fragMinKbps : min fragment load bandwidth
-  fragMaxKbps : max fragment load bandwidth
-  fragAvgKbps : avg fragment load bandwidth
-  fragLastKbps : last fragment load bandwidth
-  fragMinLatency : min fragment load latency
-  fragMaxLatency : max fragment load latency
-  fragAvgLatency : avg fragment load latency
-  fragLastLatency : last fragment load latency
-  fragBuffered : total nb of buffered fragments  
-  fragBufferedBytes : total nb of buffered bytes
-  fragChangedAuto : nb of frag played (loaded in auto mode)
-  fragChangedManual : nb of frag played (loaded in manual mode)
-  fpsDropEvent : nb of FPS drop event
-  fpsTotalDroppedFrames : total nb of dropped frames since video element creation
-}
-```
 
 ## Runtime Events
 
@@ -451,6 +411,8 @@ full list of Events available below :
 
   - `Hls.Events.MSE_ATTACHED`  - fired when MediaSource has been succesfully attached to video element.
     -  data: { video , mediaSource }
+  - `Hls.Events.MSE_DETACHING`  - fired before detaching MediaSource from video element.
+    -  data: { }
   - `Hls.Events.MSE_DETACHED`  - fired when MediaSource has been detached from video element.
     -  data: { }
   - `Hls.Events.MANIFEST_LOADING`  - fired to signal that a manifest loading starts
@@ -463,6 +425,10 @@ full list of Events available below :
     -  data: { url : level URL, level : id of level being loaded}
   - `Hls.Events.LEVEL_LOADED`  - fired when a level playlist loading finishes
     -  data: { details : levelDetails object, levelId : id of loaded level, stats : { trequest, tfirst, tload, mtime} }
+  - `Hls.Events.LEVEL_UPDATED`  - fired when a level's details have been updated based on previous details, after it has been loaded
+    -  data: { details : levelDetails object, level : id of updated level }
+  - `Hls.Events.LEVEL_PTS_UPDATED`  - fired when a level's PTS information has been updated after parsing a fragment
+    -  data: { details : levelDetails object, level : id of updated level, drift: PTS drift observed when parsing last fragment } 
   - `Hls.Events.LEVEL_SWITCH`  - fired when a level switch is requested
     -  data: { levelId : id of new level }
   - `Hls.Events.FRAG_LOADING`  - fired when a fragment loading starts
