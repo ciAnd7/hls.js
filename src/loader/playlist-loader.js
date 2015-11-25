@@ -4,6 +4,7 @@
 
 import Event from '../events';
 import {ErrorTypes, ErrorDetails} from '../errors';
+import URLHelper from '../utils/url';
 //import {logger} from '../utils/logger';
 
 class PlaylistLoader {
@@ -39,24 +40,12 @@ class PlaylistLoader {
     this.url = url;
     this.id = id1;
     this.id2 = id2;
-    this.loader = new config.loader(config);
+    this.loader = typeof(config.pLoader) !== 'undefined' ? new config.pLoader(config) : new config.loader(config);
     this.loader.load(url, '', this.loadsuccess.bind(this), this.loaderror.bind(this), this.loadtimeout.bind(this), config.manifestLoadingTimeOut, config.manifestLoadingMaxRetry, config.manifestLoadingRetryDelay);
   }
 
   resolve(url, baseUrl) {
-    var doc      = document,
-        oldBase = doc.getElementsByTagName('base')[0],
-        oldHref = oldBase && oldBase.href,
-        docHead = doc.head || doc.getElementsByTagName('head')[0],
-        ourBase = oldBase || docHead.appendChild(doc.createElement('base')),
-        resolver = doc.createElement('a'),
-        resolvedUrl;
-    ourBase.href = baseUrl;
-    resolver.href = url;
-    resolvedUrl  = resolver.href; // browser magic at work here
-    if (oldBase) { oldBase.href = oldHref; }
-    else { docHead.removeChild(ourBase); }
-    return resolvedUrl;
+    return URLHelper.buildAbsoluteURL(baseUrl, url);
   }
 
   parseMasterPlaylist(string, baseurl) {
@@ -171,7 +160,7 @@ class PlaylistLoader {
       // fallback to initial URL
       url = this.url;
     }
-    stats.tload = new Date();
+    stats.tload = performance.now();
     stats.mtime = new Date(event.currentTarget.getResponseHeader('Last-Modified'));
     if (string.indexOf('#EXTM3U') === 0) {
       if (string.indexOf('#EXTINF:') > 0) {
@@ -181,7 +170,9 @@ class PlaylistLoader {
         if (this.id === null) {
           hls.trigger(Event.MANIFEST_LOADED, {levels: [{url: url}], url: url, stats: stats});
         } else {
-          hls.trigger(Event.LEVEL_LOADED, {details: this.parseLevelPlaylist(string, url, id), level: id, id: id2, stats: stats});
+          var levelDetails = this.parseLevelPlaylist(string, url, id);
+          stats.tparsed = performance.now();
+          hls.trigger(Event.LEVEL_LOADED, {details: levelDetails, level: id, id: id2, stats: stats});
         }
       } else {
         levels = this.parseMasterPlaylist(string, url);

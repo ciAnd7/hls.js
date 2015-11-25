@@ -59,7 +59,7 @@
     x_offset += ctx.measureText(legend).width+5;
 
     for (i =0, y_offset = 20; i < events.length; i++) {
-      var event = events[i], start = event.time, end = event.time + event.duration + event.latency;
+      var event = events[i], start = Math.round(event.time), end = Math.round(event.time + event.duration + event.latency);
       if((start >= minTime && start <= maxTime)) {
         canvasDrawLoadEvent(ctx,y_offset,event,minTime,maxTime);
         y_offset+=20;
@@ -101,7 +101,7 @@
     ctx.fillText(legend,x_offset,15);
 
     for (i =0, y_offset = 20; i < events.length; i++) {
-      var event = events[i], start = event.time, end = event.time;
+      var event = events[i], start = Math.round(event.time), end = Math.round(event.time);
       if((start >= minTime && start <= maxTime)) {
         canvasDrawVideoEvent(ctx,y_offset,event,minTime,maxTime);
         y_offset+=20;
@@ -414,12 +414,12 @@
     var legend,offset,x_start,x_w,
     networkChartStart = eventLeftMargin,
     networkChartWidth = ctx.canvas.width-eventLeftMargin-eventRightMargin,
-    tend = event.time + event.duration + event.latency;
+    tend = Math.round(event.time + event.duration + event.latency);
 
    //draw start
     ctx.fillStyle = "black";
     ctx.font = "12px Arial";
-    legend = event.time;
+    legend = Math.round(event.time);
     offset = ctx.measureText(legend).width+5;
     x_start = networkChartStart-offset+networkChartWidth*(event.time-minTime)/(maxTime-minTime);
     ctx.fillText(legend,x_start,yoffset+12);
@@ -435,18 +435,20 @@
     x_w = networkChartWidth*event.load/(maxTime-minTime);
     ctx.fillRect(x_start,yoffset,x_w, 15);
 
-    if(event.demux) {
-      //draw demux rectangle
+    if(event.parsing) {
+      //draw parsing rectangle
       ctx.fillStyle = "blue";
       x_start = networkChartStart + networkChartWidth*(event.time+event.latency+event.load-minTime)/(maxTime-minTime);
-      x_w = networkChartWidth*event.demux/(maxTime-minTime);
+      x_w = networkChartWidth*event.parsing/(maxTime-minTime);
       ctx.fillRect(x_start,yoffset,x_w, 15);
 
-      //draw buffering rectangle
-      ctx.fillStyle = "red";
-      x_start = networkChartStart + networkChartWidth*(event.time+event.latency+event.load+event.demux-minTime)/(maxTime-minTime);
-      x_w = networkChartWidth*event.buffer/(maxTime-minTime);
-      ctx.fillRect(x_start,yoffset,x_w, 15);
+      if(event.buffer) {
+        //draw buffering rectangle
+        ctx.fillStyle = "red";
+        x_start = networkChartStart + networkChartWidth*(event.time+event.latency+event.load+event.parsing-minTime)/(maxTime-minTime);
+        x_w = networkChartWidth*event.buffer/(maxTime-minTime);
+        ctx.fillRect(x_start,yoffset,x_w, 15);
+      }
     }
 
    //draw end time
@@ -457,27 +459,30 @@
     ctx.fillText(legend,x_start,yoffset+12);
     x_start += ctx.measureText(legend).width+5;
 
-    legend = "[" + event.latency;
+    legend = "[" + Math.round(event.latency);
     ctx.fillStyle = "orange";
     ctx.fillText(legend,x_start,yoffset+12);
     x_start += ctx.measureText(legend).width+5;
 
-    legend = event.load;
-    if(!event.demux) legend += "]";
+    legend = Math.round(event.load);
+    if(!event.parsing) legend += "]";
     ctx.fillStyle = "green";
     ctx.fillText(legend,x_start,yoffset+12);
     x_start += ctx.measureText(legend).width+5;
 
-    if(event.demux) {
-      legend = event.demux;
+    if(event.parsing) {
+      legend = Math.round(event.parsing);
+      if(!event.buffer) legend +="]";
       ctx.fillStyle = "blue";
       ctx.fillText(legend,x_start,yoffset+12);
       x_start += ctx.measureText(legend).width+5;
 
-      legend = event.buffer + "]";
-      ctx.fillStyle = "red";
-      ctx.fillText(legend,x_start,yoffset+12);
-      x_start += ctx.measureText(legend).width+5;
+      if(event.buffer) {
+        legend = Math.round(event.buffer) + "]";
+        ctx.fillStyle = "red";
+        ctx.fillText(legend,x_start,yoffset+12);
+        x_start += ctx.measureText(legend).width+5;
+      }
     }
 
     if(event.size) {
@@ -537,7 +542,7 @@
    //draw start time
     ctx.fillStyle = "black";
     ctx.font = "12px Arial";
-    legend = event.time;
+    legend = Math.round(event.time);
     offset = ctx.measureText(legend).width+5;
     x_start = networkChartStart-offset+networkChartWidth*(event.time-minTime)/(maxTime-minTime);
     ctx.fillText(legend,x_start,yoffset+12);
@@ -557,12 +562,12 @@
      //draw end time
       ctx.fillStyle = "black";
       ctx.font = "12px Arial";
-      legend = event.time+event.duration;
+      legend = Math.round(event.time+event.duration);
       x_start += x_w + 5;
       ctx.fillText(legend,x_start,yoffset+12);
       x_start += ctx.measureText(legend).width+5;
 
-      legend = "[" + event.duration + "]";
+      legend = "[" + Math.round(event.duration) + "]";
       ctx.fillStyle = "blue";
       ctx.fillText(legend,x_start,yoffset+12);
     }

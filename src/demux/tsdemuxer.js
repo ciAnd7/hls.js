@@ -49,13 +49,14 @@
   }
 
   // feed incoming data to the front of the parsing pipeline
-  push(data, audioCodec, videoCodec, timeOffset, cc, level, duration) {
+  push(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration) {
     var avcData, aacData, id3Data,
         start, len = data.length, stt, pid, atf, offset;
     this.audioCodec = audioCodec;
     this.videoCodec = videoCodec;
     this.timeOffset = timeOffset;
     this._duration = duration;
+    this.contiguous = false;
     if (cc !== this.lastCC) {
       logger.log('discontinuity detected');
       this.insertDiscontinuity();
@@ -64,7 +65,16 @@
       logger.log('level switch detected');
       this.switchLevel();
       this.lastLevel = level;
+    } else if (sn === (this.lastSN+1)) {
+      this.contiguous = true;
     }
+    this.lastSN = sn;
+
+    if(!this.contiguous) {
+      // flush any partial content
+      this.aacOverFlow = null;
+    }
+
     var pmtParsed = this.pmtParsed,
         avcId = this._avcTrack.id,
         aacId = this._aacTrack.id,
@@ -152,7 +162,7 @@
   }
 
   remux() {
-    this.remuxer.remux(this._aacTrack,this._avcTrack, this._id3Track, this.timeOffset);
+    this.remuxer.remux(this._aacTrack,this._avcTrack, this._id3Track, this.timeOffset, this.contiguous);
   }
 
   destroy() {
@@ -261,40 +271,59 @@
   }
 
   _parseAVCPES(pes) {
-    var units,track = this._avcTrack, avcSample, key = false;
-    units = this._parseAVCNALu(pes.data);
+    var track = this._avcTrack,
+        samples = track.samples,
+        units = this._parseAVCNALu(pes.data),
+        units2 = [],
+        debug = false,
+        key = false,
+        length = 0,
+        avcSample,
+        push;
     // no NALu found
-    if (units.length === 0 & this._avcTrack.samples.length > 0) {
+    if (units.length === 0 && samples.length > 0) {
       // append pes.data to previous NAL unit
-      var lastavcSample = this._avcTrack.samples[this._avcTrack.samples.length - 1];
+      var lastavcSample = samples[samples.length - 1];
       var lastUnit = lastavcSample.units.units[lastavcSample.units.units.length - 1];
       var tmp = new Uint8Array(lastUnit.data.byteLength + pes.data.byteLength);
       tmp.set(lastUnit.data, 0);
       tmp.set(pes.data, lastUnit.data.byteLength);
       lastUnit.data = tmp;
       lastavcSample.units.length += pes.data.byteLength;
-      this._avcTrack.len += pes.data.byteLength;
+      track.len += pes.data.byteLength;
     }
     //free pes.data to save up some memory
     pes.data = null;
-    //var debugString = '';
-    units.units.forEach(unit => {
+    var debugString = '';
+    units.forEach(unit => {
       switch(unit.type) {
         //NDR
-        // case 1:
-        //   debugString += 'NDR ';
-        //   break;
+         case 1:
+           push = true;
+           if(debug) {
+            debugString += 'NDR ';
+           }
+           break;
         //IDR
         case 5:
-          //debugString += 'IDR ';
+          push = true;
+          if(debug) {
+            debugString += 'IDR ';
+          }
           key = true;
           break;
-        //case 6:
-        //  debugString += 'SEI ';
-        //  break;
+        case 6:
+          push = true;
+          if(debug) {
+            debugString += 'SEI ';
+          }
+          break;
         //SPS
         case 7:
-          //debugString += 'SPS ';
+          push = true;
+          if(debug) {
+            debugString += 'SPS ';
+          }
           if(!track.sps) {
             var expGolombDecoder = new ExpGolomb(unit.data);
             var config = expGolombDecoder.readSPS();
@@ -320,27 +349,42 @@
           break;
         //PPS
         case 8:
-          //debugString += 'PPS ';
+          push = true;
+          if(debug) {
+            debugString += 'PPS ';
+          }
           if (!track.pps) {
             track.pps = [unit.data];
           }
           break;
-        //case 9:
-        //  debugString += 'AUD ';
+        case 9:
+          push = true;
+          if(debug) {
+            debugString += 'AUD ';
+          }
+          break;
         default:
+          push = false;
+          debugString += 'unknown NAL ' + unit.type + ' ';
           break;
       }
+      if(push) {
+        units2.push(unit);
+        length+=unit.data.byteLength;
+      }
     });
-    //logger.log(debugString);
+    if(debug || debugString.length) {
+      logger.log(debugString);
+    }
     //build sample from PES
     // Annex B to MP4 conversion to be done
-    if (units.length) {
+    if (units2.length) {
       // only push AVC sample if keyframe already found. browsers expect a keyframe at first to start decoding
       if (key === true || track.sps ) {
-        avcSample = {units: units, pts: pes.pts, dts: pes.dts, key: key};
-        this._avcTrack.samples.push(avcSample);
-        this._avcTrack.len += units.length;
-        this._avcTrack.nbNalu += units.units.length;
+        avcSample = {units: { units : units2, length : length}, pts: pes.pts, dts: pes.dts, key: key};
+        samples.push(avcSample);
+        track.len += length;
+        track.nbNalu += units2.length;
       }
     }
   }
@@ -348,7 +392,7 @@
 
   _parseAVCNALu(array) {
     var i = 0, len = array.byteLength, value, overflow, state = 0;
-    var units = [], unit, unitType, lastUnitStart, lastUnitType, length = 0;
+    var units = [], unit, unitType, lastUnitStart, lastUnitType;
     //logger.log('PES:' + Hex.hexDump(array));
     while (i < len) {
       value = array[i++];
@@ -375,7 +419,6 @@
             //logger.log('find NALU @ offset:' + i + ',type:' + unitType);
             if (lastUnitStart) {
               unit = {data: array.subarray(lastUnitStart, i - state - 1), type: lastUnitType};
-              length += i - state - 1 - lastUnitStart;
               //logger.log('pushing NALU, type/size:' + unit.type + '/' + unit.data.byteLength);
               units.push(unit);
             } else {
@@ -412,11 +455,10 @@
     }
     if (lastUnitStart) {
       unit = {data: array.subarray(lastUnitStart, len), type: lastUnitType};
-      length += len - lastUnitStart;
       units.push(unit);
       //logger.log('pushing NALU, type/size:' + unit.type + '/' + unit.data.byteLength);
     }
-    return {units: units , length: length};
+    return units;
   }
 
   _parseAACPES(pes) {

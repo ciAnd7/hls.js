@@ -32,7 +32,7 @@ let's
     var video = document.getElementById('video');
     var hls = new Hls();
     // bind them together
-    hls.attachVideo(video);
+    hls.attachMedia(video);
     // MSE_ATTACHED event is fired by hls object once MediaSource is ready
     hls.on(Hls.Events.MSE_ATTACHED,function() {
 		  console.log("video and hls.js are now bound together !");
@@ -53,7 +53,7 @@ you need to provide manifest URL as below:
     var video = document.getElementById('video');
     var hls = new Hls();
     // bind them together
-    hls.attachVideo(video);
+    hls.attachMedia(video);
     hls.on(Hls.Events.MSE_ATTACHED,function() {
 		console.log("video and hls.js are now bound together !");
 		hls.loadSource("http://my.streamURL.com/playlist.m3u8");
@@ -144,7 +144,7 @@ should be invoked to recover media error
       case Hls.ErrorTypes.NETWORK_ERROR:
       // try to recover network error
         console.log("fatal network error encountered, try to recover");
-        hls.recoverNetworkError();
+        hls.startLoad();
         break;
       case Hls.ErrorTypes.MEDIA_ERROR:
         console.log("fatal media error encountered, try to recover");
@@ -188,6 +188,8 @@ configuration parameters could be provided to hls.js upon instantiation of Hls O
       fpsDroppedMonitoringThreshold : 0.2,
       appendErrorMaxRetry : 200,
       loader : customLoader,
+      fLoader: customFragmentLoader,
+      pLoader: customPlaylistLoader,
       xhrSetup : XMLHttpRequestSetupCallback,
       abrController : customAbrController
     };
@@ -267,6 +269,10 @@ such error could happen in loop with UHD streams, when internal buffer is full. 
 override standard URL loader by a custom one.
 could be useful for P2P or stubbing (testing).
 
+Use this, if you want to overwrite both the fragment and the playlist loader.
+
+Note: If fLoader or pLoader are used, they overwrite loader!
+
 ```js
 var customLoader = function() {
 
@@ -288,6 +294,28 @@ var customLoader = function() {
   this.abort = function() {}
   /* destroy loading context */
   this.destroy = function() {}
+  }
+```
+
+#### ```fLoader```
+(default : undefined)
+
+This enables the manipulation of the fragment loader.
+Note: This will overwrite the default loader, as well as your own loader function (see above).
+```js
+var customFragmentLoader = function() {
+    //See loader for details
+  }
+```
+
+#### ```pLoader```
+(default : undefined)
+
+This enables the manipulation of the playlist loader.
+Note: This will overwrite the default loader, as well as your own loader function (see above).
+```js
+var customPlaylistLoader = function() {
+    //See loader for details
   }
 ```
 
@@ -322,7 +350,7 @@ parameter should be a class providing 2 getter/setters and a destroy() method:
 
 ## Video Binding/Unbinding API
 
-#### ```hls.attachVideo(videoElement)```
+#### ```hls.attachMedia(videoElement)```
 calling this method will :
 
  - bind videoElement and hls instance, 
