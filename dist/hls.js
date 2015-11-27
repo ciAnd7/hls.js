@@ -619,6 +619,8 @@ var LevelController = (function () {
         case _errors.ErrorDetails.FRAG_LOAD_ERROR:
         case _errors.ErrorDetails.FRAG_LOAD_TIMEOUT:
         case _errors.ErrorDetails.FRAG_LOOP_LOADING_ERROR:
+        case _errors.ErrorDetails.KEY_LOAD_ERROR:
+        case _errors.ErrorDetails.KEY_LOAD_TIMEOUT:
           levelId = data.frag.level;
           break;
         case _errors.ErrorDetails.LEVEL_LOAD_ERROR:
@@ -749,7 +751,7 @@ var LevelController = (function () {
 exports['default'] = LevelController;
 module.exports = exports['default'];
 
-},{"../errors":11,"../events":12,"../utils/logger":19}],5:[function(require,module,exports){
+},{"../errors":11,"../events":12,"../utils/logger":21}],5:[function(require,module,exports){
 /*
  * MSE Media Controller
 */
@@ -776,6 +778,10 @@ var _events2 = _interopRequireDefault(_events);
 
 var _utilsLogger = require('../utils/logger');
 
+var _utilsBinarySearch = require('../utils/binary-search');
+
+var _utilsBinarySearch2 = _interopRequireDefault(_utilsBinarySearch);
+
 var _helperLevelHelper = require('../helper/level-helper');
 
 var _helperLevelHelper2 = _interopRequireDefault(_helperLevelHelper);
@@ -786,12 +792,13 @@ var State = {
   ERROR: -2,
   STARTING: -1,
   IDLE: 0,
-  LOADING: 1,
-  WAITING_LEVEL: 2,
-  PARSING: 3,
-  PARSED: 4,
-  APPENDING: 5,
-  BUFFER_FLUSHING: 6
+  KEY_LOADING: 1,
+  FRAG_LOADING: 2,
+  WAITING_LEVEL: 3,
+  PARSING: 4,
+  PARSED: 5,
+  APPENDING: 6,
+  BUFFER_FLUSHING: 7
 };
 
 var MSEMediaController = (function () {
@@ -809,6 +816,7 @@ var MSEMediaController = (function () {
     this.onmp = this.onManifestParsed.bind(this);
     this.onll = this.onLevelLoaded.bind(this);
     this.onfl = this.onFragLoaded.bind(this);
+    this.onkl = this.onKeyLoaded.bind(this);
     this.onis = this.onInitSegment.bind(this);
     this.onfpg = this.onFragParsing.bind(this);
     this.onfp = this.onFragParsed.bind(this);
@@ -865,6 +873,7 @@ var MSEMediaController = (function () {
       hls.on(_events2['default'].FRAG_PARSED, this.onfp);
       hls.on(_events2['default'].ERROR, this.onerr);
       hls.on(_events2['default'].LEVEL_LOADED, this.onll);
+      hls.on(_events2['default'].KEY_LOADED, this.onkl);
     }
   }, {
     key: 'stop',
@@ -904,6 +913,7 @@ var MSEMediaController = (function () {
       hls.off(_events2['default'].FRAG_PARSED, this.onfp);
       hls.off(_events2['default'].FRAG_PARSING_DATA, this.onfpg);
       hls.off(_events2['default'].LEVEL_LOADED, this.onll);
+      hls.off(_events2['default'].KEY_LOADED, this.onkl);
       hls.off(_events2['default'].FRAG_PARSING_INIT_SEGMENT, this.onis);
       hls.off(_events2['default'].ERROR, this.onerr);
     }
@@ -913,7 +923,6 @@ var MSEMediaController = (function () {
       var pos,
           level,
           levelDetails,
-          fragIdx,
           hls = this.hls;
       switch (this.state) {
         case State.ERROR:
@@ -956,6 +965,7 @@ var MSEMediaController = (function () {
           var bufferInfo = this.bufferInfo(pos, 0.3),
               bufferLen = bufferInfo.len,
               bufferEnd = bufferInfo.end,
+              fragPrevious = this.fragPrevious,
               maxBufLen;
           // compute max Buffer Length that we could get from this load level, based on level bitrate. don't buffer more than 60 MB and more than 30s
           if (this.levels[level].hasOwnProperty('bitrate')) {
@@ -996,8 +1006,8 @@ var MSEMediaController = (function () {
                    try to load frag matching with next SN.
                    even if SN are not synchronized between playlists, loading this frag will help us
                    compute playlist sliding and find the right one after in case it was not the right consecutive one */
-                if (this.fragPrevious) {
-                  var targetSN = this.fragPrevious.sn + 1;
+                if (fragPrevious) {
+                  var targetSN = fragPrevious.sn + 1;
                   if (targetSN >= levelDetails.startSN && targetSN <= levelDetails.endSN) {
                     _frag = fragments[targetSN - levelDetails.startSN];
                     _utilsLogger.logger.log('live playlist, switching playlist, load frag with next SN: ' + _frag.sn);
@@ -1022,55 +1032,69 @@ var MSEMediaController = (function () {
                 // reach end of playlist
                 break;
               }
-              for (fragIdx = 0; fragIdx < fragLen; fragIdx++) {
-                _frag = fragments[fragIdx];
-                start = _frag.start;
-                //logger.log('level/sn/sliding/start/end/bufEnd:${level}/${frag.sn}/${sliding.toFixed(3)}/${start.toFixed(3)}/${(start+frag.duration).toFixed(3)}/${bufferEnd.toFixed(3)}');
+              var foundFrag = _utilsBinarySearch2['default'].search(fragments, function (candidate) {
+                //logger.log('level/sn/sliding/start/end/bufEnd:${level}/${candidate.sn}/${sliding.toFixed(3)}/${candidate.start.toFixed(3)}/${(candidate.start+candidate.duration).toFixed(3)}/${bufferEnd.toFixed(3)}');
                 // offset should be within fragment boundary
-                if (start <= bufferEnd && start + _frag.duration > bufferEnd) {
-                  break;
+                if (candidate.start + candidate.duration <= bufferEnd) {
+                  return 1;
+                } else if (candidate.start > bufferEnd) {
+                  return -1;
+                }
+                return 0;
+              });
+
+              if (foundFrag) {
+                _frag = foundFrag;
+                start = foundFrag.start;
+                //logger.log('find SN matching with pos:' +  bufferEnd + ':' + frag.sn);
+                if (fragPrevious && _frag.level === fragPrevious.level && _frag.sn === fragPrevious.sn) {
+                  if (_frag.sn < levelDetails.endSN) {
+                    _frag = fragments[_frag.sn + 1 - levelDetails.startSN];
+                    _utilsLogger.logger.log('SN just loaded, load next one: ' + _frag.sn);
+                  } else {
+                    // end of VOD playlist reached
+                    _frag = null;
+                  }
                 }
               }
-              //logger.log('find SN matching with pos:' +  bufferEnd + ':' + frag.sn);
-              if (this.fragPrevious && _frag.level === this.fragPrevious.level && _frag.sn === this.fragPrevious.sn) {
-                if (fragIdx >= fragLen - 1) {
-                  // we are at the end of the playlist and we already loaded last fragment, don't do anything
-                  break;
+            }
+            if (_frag) {
+              //logger.log('      loading frag ' + i +',pos/bufEnd:' + pos.toFixed(3) + '/' + bufferEnd.toFixed(3));
+              if (_frag.decryptdata.uri != null && _frag.decryptdata.key == null) {
+                _utilsLogger.logger.log('Loading key for ' + _frag.sn + ' of [' + levelDetails.startSN + ' ,' + levelDetails.endSN + '],level ' + level);
+                this.state = State.KEY_LOADING;
+                hls.trigger(_events2['default'].KEY_LOADING, { frag: _frag });
+              } else {
+                _utilsLogger.logger.log('Loading ' + _frag.sn + ' of [' + levelDetails.startSN + ' ,' + levelDetails.endSN + '],level ' + level + ', currentTime:' + pos + ',bufferEnd:' + bufferEnd.toFixed(3));
+                _frag.autoLevel = hls.autoLevelEnabled;
+                if (this.levels.length > 1) {
+                  _frag.expectedLen = Math.round(_frag.duration * this.levels[level].bitrate / 8);
+                  _frag.trequest = performance.now();
+                }
+                // ensure that we are not reloading the same fragments in loop ...
+                if (this.fragLoadIdx !== undefined) {
+                  this.fragLoadIdx++;
                 } else {
-                  _frag = fragments[fragIdx + 1];
-                  _utilsLogger.logger.log('SN just loaded, load next one: ' + _frag.sn);
+                  this.fragLoadIdx = 0;
                 }
+                if (_frag.loadCounter) {
+                  _frag.loadCounter++;
+                  var maxThreshold = this.config.fragLoadingLoopThreshold;
+                  // if this frag has already been loaded 3 times, and if it has been reloaded recently
+                  if (_frag.loadCounter > maxThreshold && Math.abs(this.fragLoadIdx - _frag.loadIdx) < maxThreshold) {
+                    hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_LOOP_LOADING_ERROR, fatal: false, frag: _frag });
+                    return;
+                  }
+                } else {
+                  _frag.loadCounter = 1;
+                }
+                _frag.loadIdx = this.fragLoadIdx;
+                this.fragCurrent = _frag;
+                this.startFragmentRequested = true;
+                hls.trigger(_events2['default'].FRAG_LOADING, { frag: _frag });
+                this.state = State.FRAG_LOADING;
               }
             }
-            _utilsLogger.logger.log('Loading ' + _frag.sn + ' of [' + levelDetails.startSN + ' ,' + levelDetails.endSN + '],level ' + level + ', currentTime:' + pos + ',bufferEnd:' + bufferEnd.toFixed(3));
-            //logger.log('      loading frag ' + i +',pos/bufEnd:' + pos.toFixed(3) + '/' + bufferEnd.toFixed(3));
-            _frag.autoLevel = hls.autoLevelEnabled;
-            if (this.levels.length > 1) {
-              _frag.expectedLen = Math.round(_frag.duration * this.levels[level].bitrate / 8);
-              _frag.trequest = performance.now();
-            }
-            // ensure that we are not reloading the same fragments in loop ...
-            if (this.fragLoadIdx !== undefined) {
-              this.fragLoadIdx++;
-            } else {
-              this.fragLoadIdx = 0;
-            }
-            if (_frag.loadCounter) {
-              _frag.loadCounter++;
-              var maxThreshold = this.config.fragLoadingLoopThreshold;
-              // if this frag has already been loaded 3 times, and if it has been reloaded recently
-              if (_frag.loadCounter > maxThreshold && Math.abs(this.fragLoadIdx - _frag.loadIdx) < maxThreshold) {
-                hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_LOOP_LOADING_ERROR, fatal: false, frag: _frag });
-                return;
-              }
-            } else {
-              _frag.loadCounter = 1;
-            }
-            _frag.loadIdx = this.fragLoadIdx;
-            this.fragCurrent = _frag;
-            this.startFragmentRequested = true;
-            hls.trigger(_events2['default'].FRAG_LOADING, { frag: _frag });
-            this.state = State.LOADING;
           }
           break;
         case State.WAITING_LEVEL:
@@ -1080,7 +1104,7 @@ var MSEMediaController = (function () {
             this.state = State.IDLE;
           }
           break;
-        case State.LOADING:
+        case State.FRAG_LOADING:
           /*
             monitor fragment retrieval time...
             we compute expected time of arrival of the complete fragment.
@@ -1124,8 +1148,7 @@ var MSEMediaController = (function () {
         case State.APPENDING:
           if (this.sourceBuffer) {
             if (this.media.error) {
-              _utilsLogger.logger.error('trying to append although a media error occured');
-              hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_APPENDING_ERROR, frag: this.fragCurrent, fatal: true });
+              _utilsLogger.logger.error('trying to append although a media error occured, switch to ERROR state');
               this.state = State.ERROR;
               return;
             }
@@ -1206,8 +1229,8 @@ var MSEMediaController = (function () {
   }, {
     key: 'bufferInfo',
     value: function bufferInfo(pos, maxHoleDuration) {
-      var v = this.media,
-          vbuffered = v.buffered,
+      var sourceBuffer = this.sourceBuffer,
+          data,
           bufferLen,
 
       // bufferStart and bufferEnd are buffer boundaries around current video position
@@ -1218,23 +1241,43 @@ var MSEMediaController = (function () {
           buffered = [],
           buffered2 = [];
 
-      for (i = 0; i < vbuffered.length; i++) {
-        buffered.push({ start: vbuffered.start(i), end: vbuffered.end(i) });
+      for (var type in sourceBuffer) {
+        data = sourceBuffer[type].buffered;
+        for (i = 0; i < data.length; i++) {
+          buffered.push({ start: data.start(i), end: data.end(i) });
+        }
       }
-
-      // sort on buffer.start (IE does not always return sorted buffered range)
+      // sort on buffer.start/smaller end (IE does not always return sorted buffered range)
       buffered.sort(function (a, b) {
-        return a.start - b.start;
+        var diff = a.start - b.start;
+        if (diff) {
+          return diff;
+        } else {
+          return b.end - a.end;
+        }
       });
-
       // there might be some small holes between buffer time range
       // consider that holes smaller than maxHoleDuration are irrelevant and build another
       // buffer time range representations that discards those holes
       for (i = 0; i < buffered.length; i++) {
-        //logger.log('buf start/end:' + buffered.start(i) + '/' + buffered.end(i));
-        if (buffered2.length && buffered[i].start - buffered2[buffered2.length - 1].end < maxHoleDuration) {
-          buffered2[buffered2.length - 1].end = buffered[i].end;
+        var buf2len = buffered2.length;
+        if (buf2len) {
+          var buf2end = buffered2[buf2len - 1].end;
+          // if small hole (value between 0 or maxHoleDuration ) or overlapping (negative)
+          if (buffered[i].start - buf2end < maxHoleDuration) {
+            // merge overlapping time ranges
+            // update lastRange.end only if smaller than item.end
+            // e.g.  [ 1, 15] with  [ 2,8] => [ 1,15] (no need to modify lastRange.end)
+            // whereas [ 1, 8] with  [ 2,15] => [ 1,15] ( lastRange should switch from [1,8] to [1,15])
+            if (buffered[i].end > buf2end) {
+              buffered2[buf2len - 1].end = buffered[i].end;
+            }
+          } else {
+            // big hole
+            buffered2.push(buffered[i]);
+          }
         } else {
+          // first value
           buffered2.push(buffered[i]);
         }
       }
@@ -1557,7 +1600,7 @@ var MSEMediaController = (function () {
   }, {
     key: 'onMediaSeeking',
     value: function onMediaSeeking() {
-      if (this.state === State.LOADING) {
+      if (this.state === State.FRAG_LOADING) {
         // check if currently loaded fragment is inside buffer.
         //if outside, cancel fragment loading, otherwise do nothing
         if (this.bufferInfo(this.media.currentTime, 0.3).len === 0) {
@@ -1683,10 +1726,18 @@ var MSEMediaController = (function () {
       this.tick();
     }
   }, {
+    key: 'onKeyLoaded',
+    value: function onKeyLoaded() {
+      if (this.state === State.KEY_LOADING) {
+        this.state = State.IDLE;
+        this.tick();
+      }
+    }
+  }, {
     key: 'onFragLoaded',
     value: function onFragLoaded(event, data) {
       var fragCurrent = this.fragCurrent;
-      if (this.state === State.LOADING && fragCurrent && data.frag.level === fragCurrent.level && data.frag.sn === fragCurrent.sn) {
+      if (this.state === State.FRAG_LOADING && fragCurrent && data.frag.level === fragCurrent.level && data.frag.sn === fragCurrent.sn) {
         if (this.fragBitrateTest === true) {
           // switch back to IDLE state ... we just loaded a fragment to determine adequate start bitrate and initialize autoswitch algo
           this.state = State.IDLE;
@@ -1704,7 +1755,7 @@ var MSEMediaController = (function () {
               level = fragCurrent.level,
               sn = fragCurrent.sn;
           _utilsLogger.logger.log('Demuxing ' + sn + ' of [' + details.startSN + ' ,' + details.endSN + '],level ' + level);
-          this.demuxer.push(data.payload, currentLevel.audioCodec, currentLevel.videoCodec, start, fragCurrent.cc, level, sn, duration);
+          this.demuxer.push(data.payload, currentLevel.audioCodec, currentLevel.videoCodec, start, fragCurrent.cc, level, sn, duration, fragCurrent.decryptdata);
         }
       }
     }
@@ -1799,6 +1850,8 @@ var MSEMediaController = (function () {
         case _errors.ErrorDetails.FRAG_LOOP_LOADING_ERROR:
         case _errors.ErrorDetails.LEVEL_LOAD_ERROR:
         case _errors.ErrorDetails.LEVEL_LOAD_TIMEOUT:
+        case _errors.ErrorDetails.KEY_LOAD_ERROR:
+        case _errors.ErrorDetails.KEY_LOAD_TIMEOUT:
           // if fatal error, stop processing, otherwise move to IDLE to retry loading
           _utilsLogger.logger.warn('buffer controller: ' + data.details + ' while loading frag,switch to ' + (data.fatal ? 'ERROR' : 'IDLE') + ' state ...');
           this.state = data.fatal ? State.ERROR : State.IDLE;
@@ -1948,7 +2001,7 @@ var MSEMediaController = (function () {
 exports['default'] = MSEMediaController;
 module.exports = exports['default'];
 
-},{"../demux/demuxer":8,"../errors":11,"../events":12,"../helper/level-helper":13,"../utils/logger":19}],6:[function(require,module,exports){
+},{"../demux/demuxer":8,"../errors":11,"../events":12,"../helper/level-helper":13,"../utils/binary-search":20,"../utils/logger":21}],6:[function(require,module,exports){
 /*  inline demuxer.
  *   probe fragments and instantiate appropriate demuxer depending on content type (TSDemuxer, AACDemuxer, ...)
  */
@@ -2079,7 +2132,6 @@ var DemuxerWorker = function DemuxerWorker(self) {
       case 'demux':
         var data = ev.data;
         self.demuxer.push(new Uint8Array(data.data), data.audioCodec, data.videoCodec, data.timeOffset, data.cc, data.level, data.sn, data.duration);
-        self.demuxer.remux();
         break;
       default:
         break;
@@ -2130,7 +2182,7 @@ var DemuxerWorker = function DemuxerWorker(self) {
 exports['default'] = DemuxerWorker;
 module.exports = exports['default'];
 
-},{"../demux/demuxer-inline":6,"../events":12,"../remux/mp4-remuxer":18,"events":1}],8:[function(require,module,exports){
+},{"../demux/demuxer-inline":6,"../events":12,"../remux/mp4-remuxer":19,"events":1}],8:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -2146,6 +2198,8 @@ function _classCallCheck(instance, Constructor) { if (!(instance instanceof Cons
 var _events = require('../events');
 
 var _events2 = _interopRequireDefault(_events);
+
+var _errors = require('../errors');
 
 var _demuxDemuxerInline = require('../demux/demuxer-inline');
 
@@ -2196,14 +2250,35 @@ var Demuxer = (function () {
       }
     }
   }, {
-    key: 'push',
-    value: function push(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration) {
+    key: 'pushDecrypted',
+    value: function pushDecrypted(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration) {
       if (this.w) {
         // post fragment payload as transferable objects (no copy)
         this.w.postMessage({ cmd: 'demux', data: data, audioCodec: audioCodec, videoCodec: videoCodec, timeOffset: timeOffset, cc: cc, level: level, sn: sn, duration: duration }, [data]);
       } else {
         this.demuxer.push(new Uint8Array(data), audioCodec, videoCodec, timeOffset, cc, level, sn, duration);
-        this.demuxer.remux();
+      }
+    }
+  }, {
+    key: 'push',
+    value: function push(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration, decryptdata) {
+      if (data.byteLength > 0 && decryptdata != null && decryptdata.key != null && decryptdata.method === 'AES-128') {
+        var localthis = this;
+        window.crypto.subtle.importKey('raw', decryptdata.key, { name: 'AES-CBC', length: 128 }, false, ['decrypt']).then(function (importedKey) {
+          window.crypto.subtle.decrypt({ name: 'AES-CBC', iv: decryptdata.iv.buffer }, importedKey, data).then(function (result) {
+            localthis.pushDecrypted(result, audioCodec, videoCodec, timeOffset, cc, level, sn, duration);
+          })['catch'](function (err) {
+            _utilsLogger.logger.error('decrypting error : ' + err.message);
+            localthis.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_DECRYPT_ERROR, fatal: true, reason: err.message });
+            return;
+          });
+        })['catch'](function (err) {
+          _utilsLogger.logger.error('decrypting error : ' + err.message);
+          localthis.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_DECRYPT_ERROR, fatal: true, reason: err.message });
+          return;
+        });
+      } else {
+        this.pushDecrypted(data, audioCodec, videoCodec, timeOffset, cc, level, sn, duration);
       }
     }
   }, {
@@ -2256,7 +2331,7 @@ var Demuxer = (function () {
 exports['default'] = Demuxer;
 module.exports = exports['default'];
 
-},{"../demux/demuxer-inline":6,"../demux/demuxer-worker":7,"../events":12,"../remux/mp4-remuxer":18,"../utils/logger":19,"webworkify":2}],9:[function(require,module,exports){
+},{"../demux/demuxer-inline":6,"../demux/demuxer-worker":7,"../errors":11,"../events":12,"../remux/mp4-remuxer":19,"../utils/logger":21,"webworkify":2}],9:[function(require,module,exports){
 /**
  * Parser for exponential Golomb codes, a variable-bitwidth number encoding scheme used by h264.
 */
@@ -2523,9 +2598,6 @@ var ExpGolomb = (function () {
         frameCropBottomOffset = this.readUEG();
       }
       return {
-        profileIdc: profileIdc,
-        profileCompat: profileCompat,
-        levelIdc: levelIdc,
         width: (picWidthInMbsMinus1 + 1) * 16 - frameCropLeftOffset * 2 - frameCropRightOffset * 2,
         height: (2 - frameMbsOnlyFlag) * (picHeightInMapUnitsMinus1 + 1) * 16 - frameCropTopOffset * 2 - frameCropBottomOffset * 2
       };
@@ -2548,7 +2620,7 @@ var ExpGolomb = (function () {
 exports['default'] = ExpGolomb;
 module.exports = exports['default'];
 
-},{"../utils/logger":19}],10:[function(require,module,exports){
+},{"../utils/logger":21}],10:[function(require,module,exports){
 /**
  * highly optimized TS demuxer:
  * parse PAT, PMT
@@ -2734,6 +2806,7 @@ var TSDemuxer = (function () {
       if (id3Data) {
         this._parseID3PES(this._parsePES(id3Data));
       }
+      this.remux();
     }
   }, {
     key: 'remux',
@@ -2921,9 +2994,6 @@ var TSDemuxer = (function () {
               var config = expGolombDecoder.readSPS();
               track.width = config.width;
               track.height = config.height;
-              track.profileIdc = config.profileIdc;
-              track.profileCompat = config.profileCompat;
-              track.levelIdc = config.levelIdc;
               track.sps = [unit.data];
               track.timescale = _this.remuxer.timescale;
               track.duration = _this.remuxer.timescale * _this._duration;
@@ -3123,12 +3193,18 @@ var TSDemuxer = (function () {
         stamp = Math.round(pes.pts + nbSamples * 1024 * this.PES_TIMESCALE / track.audiosamplerate);
         //stamp = pes.pts;
         //console.log('AAC frame, offset/length/pts:' + (adtsStartOffset+7) + '/' + adtsFrameSize + '/' + stamp.toFixed(0));
-        if (adtsStartOffset + adtsHeaderLen + adtsFrameSize <= len) {
+        if (adtsFrameSize > 0 && adtsStartOffset + adtsHeaderLen + adtsFrameSize <= len) {
           aacSample = { unit: data.subarray(adtsStartOffset + adtsHeaderLen, adtsStartOffset + adtsHeaderLen + adtsFrameSize), pts: stamp, dts: stamp };
           this._aacTrack.samples.push(aacSample);
           this._aacTrack.len += adtsFrameSize;
           adtsStartOffset += adtsFrameSize + adtsHeaderLen;
           nbSamples++;
+          // look for ADTS header (0xFFFx)
+          for (; adtsStartOffset < len - 1; adtsStartOffset++) {
+            if (data[adtsStartOffset] === 0xff && (data[adtsStartOffset + 1] & 0xf0) === 0xf0) {
+              break;
+            }
+          }
         } else {
           break;
         }
@@ -3278,7 +3354,7 @@ var TSDemuxer = (function () {
 exports['default'] = TSDemuxer;
 module.exports = exports['default'];
 
-},{"../errors":11,"../events":12,"../utils/logger":19,"./exp-golomb":9}],11:[function(require,module,exports){
+},{"../errors":11,"../events":12,"../utils/logger":21,"./exp-golomb":9}],11:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -3313,10 +3389,16 @@ var ErrorDetails = {
   FRAG_LOOP_LOADING_ERROR: 'fragLoopLoadingError',
   // Identifier for fragment load timeout error - data: { frag : fragment object}
   FRAG_LOAD_TIMEOUT: 'fragLoadTimeOut',
+  // Identifier for a fragment decryption error event - data: parsing error description
+  FRAG_DECRYPT_ERROR: 'fragDecryptError',
   // Identifier for a fragment parsing error event - data: parsing error description
   FRAG_PARSING_ERROR: 'fragParsingError',
   // Identifier for a fragment appending error event - data: appending error description
-  FRAG_APPENDING_ERROR: 'fragAppendingError'
+  FRAG_APPENDING_ERROR: 'fragAppendingError',
+  // Identifier for decrypt key load error - data: { frag : fragment object, response : XHR response}
+  KEY_LOAD_ERROR: 'keyLoadError',
+  // Identifier for decrypt key load timeout error - data: { frag : fragment object}
+  KEY_LOAD_TIMEOUT: 'keyLoadTimeOut'
 };
 exports.ErrorDetails = ErrorDetails;
 
@@ -3376,7 +3458,11 @@ exports['default'] = {
   // Identifier for an error event - data: { type : error type, details : error details, fatal : if true, hls.js cannot/will not try to recover, if false, hls.js will try to recover,other error specific data}
   ERROR: 'hlsError',
   // fired when hls.js instance starts destroying. Different from MSE_DETACHED as one could want to detach and reattach a media to the instance of hls.js to handle mid-rolls for example
-  DESTROYING: 'hlsDestroying'
+  DESTROYING: 'hlsDestroying',
+  // fired when a decrypt key loading starts - data: { frag : fragment object}
+  KEY_LOADING: 'hlsKeyLoading',
+  // fired when a decrypt key loading is completed - data: { frag : fragment object, payload : key payload, stats : { trequest, tfirst, tload, length}}
+  KEY_LOADED: 'hlsKeyLoaded'
 };
 module.exports = exports['default'];
 
@@ -3526,7 +3612,7 @@ var LevelHelper = (function () {
 exports['default'] = LevelHelper;
 module.exports = exports['default'];
 
-},{"../utils/logger":19}],14:[function(require,module,exports){
+},{"../utils/logger":21}],14:[function(require,module,exports){
 /**
  * HLS interface
  */
@@ -3579,6 +3665,10 @@ var _utilsXhrLoader2 = _interopRequireDefault(_utilsXhrLoader);
 var _events3 = require('events');
 
 var _events4 = _interopRequireDefault(_events3);
+
+var _loaderKeyLoader = require('./loader/key-loader');
+
+var _loaderKeyLoader2 = _interopRequireDefault(_loaderKeyLoader);
 
 var Hls = (function () {
   _createClass(Hls, null, [{
@@ -3671,6 +3761,7 @@ var Hls = (function () {
     this.levelController = new _controllerLevelController2['default'](this);
     this.abrController = new config.abrController(this);
     this.mediaController = new config.mediaController(this);
+    this.keyLoader = new _loaderKeyLoader2['default'](this);
     //this.fpsController = new FPSController(this);
   }
 
@@ -3678,14 +3769,15 @@ var Hls = (function () {
     key: 'destroy',
     value: function destroy() {
       _utilsLogger.logger.log('destroy');
+      this.detachMedia();
       this.trigger(_events2['default'].DESTROYING);
       this.playlistLoader.destroy();
       this.fragmentLoader.destroy();
       this.levelController.destroy();
       this.mediaController.destroy();
+      this.keyLoader.destroy();
       //this.fpsController.destroy();
       this.url = null;
-      this.detachMedia();
       this.observer.removeAllListeners();
     }
   }, {
@@ -3853,7 +3945,7 @@ var Hls = (function () {
 exports['default'] = Hls;
 module.exports = exports['default'];
 
-},{"./controller/abr-controller":3,"./controller/level-controller":4,"./controller/mse-media-controller":5,"./errors":11,"./events":12,"./loader/fragment-loader":15,"./loader/playlist-loader":16,"./utils/logger":19,"./utils/xhr-loader":21,"events":1}],15:[function(require,module,exports){
+},{"./controller/abr-controller":3,"./controller/level-controller":4,"./controller/mse-media-controller":5,"./errors":11,"./events":12,"./loader/fragment-loader":15,"./loader/key-loader":16,"./loader/playlist-loader":17,"./utils/logger":21,"./utils/xhr-loader":23,"events":1}],15:[function(require,module,exports){
 /*
  * Fragment Loader
 */
@@ -3940,6 +4032,100 @@ exports['default'] = FragmentLoader;
 module.exports = exports['default'];
 
 },{"../errors":11,"../events":12}],16:[function(require,module,exports){
+/*
+ * Decrypt key Loader
+*/
+
+'use strict';
+
+Object.defineProperty(exports, '__esModule', {
+  value: true
+});
+
+var _createClass = (function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ('value' in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; })();
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { 'default': obj }; }
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError('Cannot call a class as a function'); } }
+
+var _events = require('../events');
+
+var _events2 = _interopRequireDefault(_events);
+
+var _errors = require('../errors');
+
+var KeyLoader = (function () {
+  function KeyLoader(hls) {
+    _classCallCheck(this, KeyLoader);
+
+    this.hls = hls;
+    this.decryptkey = null;
+    this.decrypturl = null;
+    this.ondkl = this.onDecryptKeyLoading.bind(this);
+    hls.on(_events2['default'].KEY_LOADING, this.ondkl);
+  }
+
+  _createClass(KeyLoader, [{
+    key: 'destroy',
+    value: function destroy() {
+      if (this.loader) {
+        this.loader.destroy();
+        this.loader = null;
+      }
+      this.hls.off(_events2['default'].KEY_LOADING, this.ondkl);
+    }
+  }, {
+    key: 'onDecryptKeyLoading',
+    value: function onDecryptKeyLoading(event, data) {
+      var frag = this.frag = data.frag,
+          decryptdata = frag.decryptdata,
+          uri = decryptdata.uri;
+      // if uri is different from previous one or if decrypt key not retrieved yet
+      if (uri !== this.decrypturl || this.decryptkey === null) {
+        var config = this.hls.config;
+        frag.loader = this.loader = new config.loader(config);
+        this.decrypturl = uri;
+        this.decryptkey = null;
+        frag.loader.load(uri, 'arraybuffer', this.loadsuccess.bind(this), this.loaderror.bind(this), this.loadtimeout.bind(this), config.fragLoadingTimeOut, config.fragLoadingMaxRetry, config.fragLoadingRetryDelay, this.loadprogress.bind(this), frag);
+      } else if (this.decryptkey) {
+        // we already loaded this key, return it
+        decryptdata.key = this.decryptkey;
+        this.hls.trigger(_events2['default'].KEY_LOADED, { frag: frag });
+      }
+    }
+  }, {
+    key: 'loadsuccess',
+    value: function loadsuccess(event) {
+      var frag = this.frag;
+      this.decryptkey = frag.decryptdata.key = new Uint8Array(event.currentTarget.response);
+      // detach fragment loader on load success
+      frag.loader = undefined;
+      this.hls.trigger(_events2['default'].KEY_LOADED, { frag: frag });
+    }
+  }, {
+    key: 'loaderror',
+    value: function loaderror(event) {
+      this.loader.abort();
+      this.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.NETWORK_ERROR, details: _errors.ErrorDetails.KEY_LOAD_ERROR, fatal: false, frag: this.frag, response: event });
+    }
+  }, {
+    key: 'loadtimeout',
+    value: function loadtimeout() {
+      this.loader.abort();
+      this.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.NETWORK_ERROR, details: _errors.ErrorDetails.KEY_LOAD_TIMEOUT, fatal: false, frag: this.frag });
+    }
+  }, {
+    key: 'loadprogress',
+    value: function loadprogress() {}
+  }]);
+
+  return KeyLoader;
+})();
+
+exports['default'] = KeyLoader;
+module.exports = exports['default'];
+
+},{"../errors":11,"../events":12}],17:[function(require,module,exports){
 /**
  * Playlist Loader
 */
@@ -4078,6 +4264,26 @@ var PlaylistLoader = (function () {
       return result;
     }
   }, {
+    key: 'parseKeyParamsByRegex',
+    value: function parseKeyParamsByRegex(string, regexp) {
+      var result = regexp.exec(string);
+      if (result) {
+        result.shift();
+        result = result.filter(function (n) {
+          return n !== undefined;
+        });
+        if (result.length === 2) {
+          return result[1];
+        }
+      }
+      return null;
+    }
+  }, {
+    key: 'cloneObj',
+    value: function cloneObj(obj) {
+      return JSON.parse(JSON.stringify(obj));
+    }
+  }, {
     key: 'parseLevelPlaylist',
     value: function parseLevelPlaylist(string, baseurl, id) {
       var currentSN = 0,
@@ -4089,7 +4295,8 @@ var PlaylistLoader = (function () {
           frag,
           byteRangeEndOffset,
           byteRangeStartOffset;
-      regexp = /(?:#EXT-X-(MEDIA-SEQUENCE):(\d+))|(?:#EXT-X-(TARGETDURATION):(\d+))|(?:#EXT(INF):([\d\.]+)[^\r\n]*([\r\n]+[^#|\r\n]+)?)|(?:#EXT-X-(BYTERANGE):([\d]+[@[\d]*)]*[\r\n]+([^#|\r\n]+)?|(?:#EXT-X-(ENDLIST))|(?:#EXT-X-(DIS)CONTINUITY))/g;
+      var levelkey = { method: null, key: null, iv: null, uri: null };
+      regexp = /(?:#EXT-X-(MEDIA-SEQUENCE):(\d+))|(?:#EXT-X-(TARGETDURATION):(\d+))|(?:#EXT-X-(KEY):(.*))|(?:#EXT(INF):([\d\.]+)[^\r\n]*([\r\n]+[^#|\r\n]+)?)|(?:#EXT-X-(BYTERANGE):([\d]+[@[\d]*)]*[\r\n]+([^#|\r\n]+)?|(?:#EXT-X-(ENDLIST))|(?:#EXT-X-(DIS)CONTINUITY))/g;
       while ((result = regexp.exec(string)) !== null) {
         result.shift();
         result = result.filter(function (n) {
@@ -4126,9 +4333,50 @@ var PlaylistLoader = (function () {
           case 'INF':
             var duration = parseFloat(result[1]);
             if (!isNaN(duration)) {
-              level.fragments.push({ url: result[2] ? this.resolve(result[2], baseurl) : null, duration: duration, start: totalduration, sn: currentSN++, level: id, cc: cc, byteRangeStartOffset: byteRangeStartOffset, byteRangeEndOffset: byteRangeEndOffset });
+              var fragdecryptdata,
+                  sn = currentSN++;
+              if (levelkey.method && levelkey.uri && !levelkey.iv) {
+                fragdecryptdata = this.cloneObj(levelkey);
+                var uint8View = new Uint8Array(16);
+                for (var i = 12; i < 16; i++) {
+                  uint8View[i] = sn >> 8 * (15 - i) & 0xff;
+                }
+                fragdecryptdata.iv = uint8View;
+              } else {
+                fragdecryptdata = levelkey;
+              }
+              level.fragments.push({ url: result[2] ? this.resolve(result[2], baseurl) : null, duration: duration, start: totalduration, sn: sn, level: id, cc: cc, byteRangeStartOffset: byteRangeStartOffset, byteRangeEndOffset: byteRangeEndOffset, decryptdata: fragdecryptdata });
               totalduration += duration;
               byteRangeStartOffset = null;
+            }
+            break;
+          case 'KEY':
+            // https://tools.ietf.org/html/draft-pantos-http-live-streaming-08#section-3.4.4
+            var decryptparams = result[1];
+            var decryptmethod = this.parseKeyParamsByRegex(decryptparams, /(METHOD)=([^,]*)/),
+                decrypturi = this.parseKeyParamsByRegex(decryptparams, /(URI)=["]([^,]*)["]/),
+                decryptiv = this.parseKeyParamsByRegex(decryptparams, /(IV)=([^,]*)/);
+            if (decryptmethod) {
+              levelkey = { method: null, key: null, iv: null, uri: null };
+              if (decrypturi && decryptmethod === 'AES-128') {
+                levelkey.method = decryptmethod;
+                // URI to get the key
+                levelkey.uri = this.resolve(decrypturi, baseurl);
+                levelkey.key = null;
+                // Initialization Vector (IV)
+                if (decryptiv) {
+                  levelkey.iv = decryptiv;
+                  if (levelkey.iv.substring(0, 2) === '0x') {
+                    levelkey.iv = levelkey.iv.substring(2);
+                  }
+                  levelkey.iv = levelkey.iv.match(/.{8}/g);
+                  levelkey.iv[0] = parseInt(levelkey.iv[0], 16);
+                  levelkey.iv[1] = parseInt(levelkey.iv[1], 16);
+                  levelkey.iv[2] = parseInt(levelkey.iv[2], 16);
+                  levelkey.iv[3] = parseInt(levelkey.iv[3], 16);
+                  levelkey.iv = new Uint32Array(levelkey.iv);
+                }
+              }
             }
             break;
           default:
@@ -4217,11 +4465,12 @@ var PlaylistLoader = (function () {
 exports['default'] = PlaylistLoader;
 module.exports = exports['default'];
 
-},{"../errors":11,"../events":12,"../utils/url":20}],17:[function(require,module,exports){
+},{"../errors":11,"../events":12,"../utils/url":22}],18:[function(require,module,exports){
 /**
  * Generate MP4 Box
 */
 
+//import Hex from '../utils/hex';
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -4496,19 +4745,37 @@ var MP4 = (function () {
     value: function avc1(track) {
       var sps = [],
           pps = [],
-          i;
+          i,
+          data,
+          len;
       // assemble the SPSs
+
       for (i = 0; i < track.sps.length; i++) {
-        sps.push(track.sps[i].byteLength >>> 8 & 0xFF);
-        sps.push(track.sps[i].byteLength & 0xFF); // sequenceParameterSetLength
-        sps = sps.concat(Array.prototype.slice.call(track.sps[i])); // SPS
+        data = track.sps[i];
+        len = data.byteLength;
+        sps.push(len >>> 8 & 0xFF);
+        sps.push(len & 0xFF);
+        sps = sps.concat(Array.prototype.slice.call(data)); // SPS
       }
+
       // assemble the PPSs
       for (i = 0; i < track.pps.length; i++) {
-        pps.push(track.pps[i].byteLength >>> 8 & 0xFF);
-        pps.push(track.pps[i].byteLength & 0xFF);
-        pps = pps.concat(Array.prototype.slice.call(track.pps[i]));
+        data = track.pps[i];
+        len = data.byteLength;
+        pps.push(len >>> 8 & 0xFF);
+        pps.push(len & 0xFF);
+        pps = pps.concat(Array.prototype.slice.call(data));
       }
+
+      var avcc = MP4.box(MP4.types.avcC, new Uint8Array([0x01, // version
+      sps[3], // profile
+      sps[4], // profile compat
+      sps[5], // level
+      0xfc | 3, // lengthSizeMinusOne, hard-coded to 4 bytes
+      0xE0 | track.sps.length // 3bit reserved (111) + numOfSequenceParameterSets
+      ].concat(sps).concat([track.pps.length // numOfPictureParameterSets
+      ]).concat(pps))); // "PPS"
+      //console.log('avcc:' + Hex.hexDump(avcc));
       return MP4.box(MP4.types.avc1, new Uint8Array([0x00, 0x00, 0x00, // reserved
       0x00, 0x00, 0x00, // reserved
       0x00, 0x01, // data_reference_index
@@ -4524,15 +4791,7 @@ var MP4 = (function () {
       0x13, 0x76, 0x69, 0x64, 0x65, 0x6f, 0x6a, 0x73, 0x2d, 0x63, 0x6f, 0x6e, 0x74, 0x72, 0x69, 0x62, 0x2d, 0x68, 0x6c, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // compressorname
       0x00, 0x18, // depth = 24
       0x11, 0x11]), // pre_defined = -1
-      MP4.box(MP4.types.avcC, new Uint8Array([0x01, // configurationVersion
-      track.profileIdc, // AVCProfileIndication
-      track.profileCompat, // profile_compatibility
-      track.levelIdc, // AVCLevelIndication
-      0xff // lengthSizeMinusOne, hard-coded to 4 bytes
-      ].concat([track.sps.length // numOfSequenceParameterSets
-      ]).concat(sps).concat([track.pps.length // numOfPictureParameterSets
-      ]).concat(pps))), // "PPS"
-      MP4.box(MP4.types.btrt, new Uint8Array([0x00, 0x1c, 0x9c, 0x80, // bufferSizeDB
+      avcc, MP4.box(MP4.types.btrt, new Uint8Array([0x00, 0x1c, 0x9c, 0x80, // bufferSizeDB
       0x00, 0x2d, 0xc6, 0xc0, // maxBitrate
       0x00, 0x2d, 0xc6, 0xc0])) // avgBitrate
       );
@@ -4686,7 +4945,7 @@ var MP4 = (function () {
 exports['default'] = MP4;
 module.exports = exports['default'];
 
-},{}],18:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 /**
  * fMP4 remuxer
 */
@@ -4993,7 +5252,7 @@ var MP4Remuxer = (function () {
           // we use DTS to compute sample duration, but we use PTS to compute initPTS which is used to sync audio and video
           mp4Sample.duration = (dtsnorm - lastDTS) / pes2mp4ScaleFactor;
           if (mp4Sample.duration < 0) {
-            //logger.log('invalid sample duration at PTS/DTS::' + aacSample.pts + '/' + aacSample.dts + ':' + mp4Sample.duration);
+            _utilsLogger.logger.log('invalid AAC sample duration at PTS:' + aacSample.pts + ':' + mp4Sample.duration);
             mp4Sample.duration = 0;
           }
         } else {
@@ -5007,11 +5266,11 @@ var MP4Remuxer = (function () {
             // log delta
             if (delta) {
               if (delta > 1) {
-                _utilsLogger.logger.log('AAC:' + delta + ' ms hole between fragments detected,filling it');
+                _utilsLogger.logger.log(delta + ' ms hole between AAC samples detected,filling it');
                 // set PTS to next PTS, and ensure PTS is greater or equal than last DTS
-                //logger.log('Audio/PTS/DTS adjusted:' + aacSample.pts + '/' + aacSample.dts);
               } else if (delta < -1) {
-                  _utilsLogger.logger.log('AAC:' + -delta + ' ms overlapping between fragments detected');
+                  _utilsLogger.logger.log(-delta + ' ms overlapping between AAC samples detected, dropping it');
+                  continue;
                 }
               // set DTS to next DTS
               ptsnorm = dtsnorm = nextAacPts;
@@ -5116,7 +5375,52 @@ var MP4Remuxer = (function () {
 exports['default'] = MP4Remuxer;
 module.exports = exports['default'];
 
-},{"../errors":11,"../events":12,"../remux/mp4-generator":17,"../utils/logger":19}],19:[function(require,module,exports){
+},{"../errors":11,"../events":12,"../remux/mp4-generator":18,"../utils/logger":21}],20:[function(require,module,exports){
+"use strict";
+
+var BinarySearch = {
+    /**
+     * Searches for an item in an array which matches a certain condition.
+     * This requires the condition to only match one item in the array,
+     * and for the array to be ordered.
+     *
+     * @param {Array} list The array to search.
+     * @param {Function} comparisonFunction
+     *      Called and provided a candidate item as the first argument.
+     *      Should return:
+     *          > -1 if the item should be located at a lower index than the provided item.
+     *          > 1 if the item should be located at a higher index than the provided item.
+     *          > 0 if the item is the item you're looking for.
+     *
+     * @return {*} The object if it is found or null otherwise.
+     */
+    search: function search(list, comparisonFunction) {
+        var minIndex = 0;
+        var maxIndex = list.length - 1;
+        var currentIndex = null;
+        var currentElement = null;
+
+        while (minIndex <= maxIndex) {
+            currentIndex = (minIndex + maxIndex) / 2 | 0;
+            currentElement = list[currentIndex];
+
+            var comparisonResult = comparisonFunction(currentElement);
+            if (comparisonResult > 0) {
+                minIndex = currentIndex + 1;
+            } else if (comparisonResult < 0) {
+                maxIndex = currentIndex - 1;
+            } else {
+                return currentElement;
+            }
+        }
+
+        return null;
+    }
+};
+
+module.exports = BinarySearch;
+
+},{}],21:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, '__esModule', {
@@ -5158,7 +5462,7 @@ exports.enableLogs = enableLogs;
 var logger = exportedLogger;
 exports.logger = logger;
 
-},{}],20:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
 'use strict';
 
 var URLHelper = {
@@ -5239,7 +5543,7 @@ var URLHelper = {
 
 module.exports = URLHelper;
 
-},{}],21:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 /**
  * XHR based logger
 */
@@ -5372,6 +5676,6 @@ var XhrLoader = (function () {
 exports['default'] = XhrLoader;
 module.exports = exports['default'];
 
-},{"../utils/logger":19}]},{},[14])(14)
+},{"../utils/logger":21}]},{},[14])(14)
 });
 //# sourceMappingURL=hls.js.map
