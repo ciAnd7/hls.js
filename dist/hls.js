@@ -434,7 +434,12 @@ var AbrController = (function () {
       }
 
       if (this._nextAutoLevel !== -1) {
-        return Math.min(this._nextAutoLevel, maxAutoLevel);
+        var nextLevel = Math.min(this._nextAutoLevel, maxAutoLevel);
+        if (nextLevel === this.lastfetchlevel) {
+          this._nextAutoLevel = -1;
+        } else {
+          return nextLevel;
+        }
       }
 
       // follow algorithm captured from stagefright :
@@ -1171,7 +1176,7 @@ var MSEMediaController = (function () {
                     } else {
                       this.appendError = 1;
                     }
-                    var event = { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_APPENDING_ERROR, frag: this.fragCurrent };
+                    var event = { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.BUFFER_APPEND_ERROR, frag: this.fragCurrent };
                     /* with UHD content, we could get loop of quota exceeded error until
                       browser is able to evict some data from sourcebuffer. retrying help recovering this
                     */
@@ -1225,28 +1230,32 @@ var MSEMediaController = (function () {
       }
       // check/update current fragment
       this._checkFragmentChanged();
+      // check buffer
+      this._checkBuffer();
     }
   }, {
     key: 'bufferInfo',
     value: function bufferInfo(pos, maxHoleDuration) {
-      var sourceBuffer = this.sourceBuffer,
-          data,
-          bufferLen,
+      var media = this.media,
+          vbuffered = media.buffered,
+          buffered = [],
+          i;
+      for (i = 0; i < vbuffered.length; i++) {
+        buffered.push({ start: vbuffered.start(i), end: vbuffered.end(i) });
+      }
+      return this.bufferedInfo(buffered, pos, maxHoleDuration);
+    }
+  }, {
+    key: 'bufferedInfo',
+    value: function bufferedInfo(buffered, pos, maxHoleDuration) {
+      var buffered2 = [],
 
       // bufferStart and bufferEnd are buffer boundaries around current video position
-      bufferStart,
+      bufferLen,
+          bufferStart,
           bufferEnd,
           bufferStartNext,
-          i,
-          buffered = [],
-          buffered2 = [];
-
-      for (var type in sourceBuffer) {
-        data = sourceBuffer[type].buffered;
-        for (i = 0; i < data.length; i++) {
-          buffered.push({ start: data.start(i), end: data.end(i) });
-        }
-      }
+          i;
       // sort on buffer.start/smaller end (IE does not always return sorted buffered range)
       buffered.sort(function (a, b) {
         var diff = a.start - b.start;
@@ -1889,13 +1898,34 @@ var MSEMediaController = (function () {
           }
           this.state = State.IDLE;
         }
-        var video = this.media;
-        if (video) {
-          // seek back to a expected position after video buffered if needed
-          if (this.seekAfterBuffered) {
-            video.currentTime = this.seekAfterBuffered;
-          } else {
-            var currentTime = video.currentTime;
+      }
+      this.tick();
+    }
+  }, {
+    key: '_checkBuffer',
+    value: function _checkBuffer() {
+      var media = this.media;
+      if (media) {
+        // compare readyState
+        var readyState = media.readyState;
+        //logger.log(`readyState:${readyState}`);
+        // if ready state different from HAVE_NOTHING (numeric value 0), we are allowed to seek
+        if (readyState) {
+          // if seek after buffered defined, let's seek if within acceptable range
+          var seekAfterBuffered = this.seekAfterBuffered;
+          if (seekAfterBuffered) {
+            if (media.duration >= seekAfterBuffered) {
+              media.currentTime = seekAfterBuffered;
+              this.seekAfterBuffered = undefined;
+            }
+          } else if (readyState < 3) {
+            // readyState = 1 or 2
+            //  HAVE_METADATA (numeric value 1)     Enough of the resource has been obtained that the duration of the resource is available.
+            //                                       The API will no longer throw an exception when seeking.
+            // HAVE_CURRENT_DATA (numeric value 2)  Data for the immediate current playback position is available,
+            //                                      but either not enough data is available that the user agent could
+            //                                      successfully advance the current playback position
+            var currentTime = media.currentTime;
             var bufferInfo = this.bufferInfo(currentTime, 0);
             // check if current time is buffered or not
             if (bufferInfo.len === 0) {
@@ -1905,22 +1935,19 @@ var MSEMediaController = (function () {
                 // next buffer is close ! adjust currentTime to nextBufferStart
                 // this will ensure effective video decoding
                 _utilsLogger.logger.log('adjust currentTime from ' + currentTime + ' to ' + nextBufferStart);
-                video.currentTime = nextBufferStart;
+                media.currentTime = nextBufferStart;
               }
             }
           }
         }
-        // reset this variable, whether it was set or not
-        this.seekAfterBuffered = undefined;
       }
-      this.tick();
     }
   }, {
     key: 'onSBUpdateError',
     value: function onSBUpdateError(event) {
       _utilsLogger.logger.error('sourceBuffer error:' + event);
       this.state = State.ERROR;
-      this.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.FRAG_APPENDING_ERROR, fatal: true, frag: this.fragCurrent });
+      this.hls.trigger(_events2['default'].ERROR, { type: _errors.ErrorTypes.MEDIA_ERROR, details: _errors.ErrorDetails.BUFFER_APPENDING_ERROR, fatal: true, frag: this.fragCurrent });
     }
   }, {
     key: 'timeRangesToString',
@@ -3393,12 +3420,14 @@ var ErrorDetails = {
   FRAG_DECRYPT_ERROR: 'fragDecryptError',
   // Identifier for a fragment parsing error event - data: parsing error description
   FRAG_PARSING_ERROR: 'fragParsingError',
-  // Identifier for a fragment appending error event - data: appending error description
-  FRAG_APPENDING_ERROR: 'fragAppendingError',
   // Identifier for decrypt key load error - data: { frag : fragment object, response : XHR response}
   KEY_LOAD_ERROR: 'keyLoadError',
   // Identifier for decrypt key load timeout error - data: { frag : fragment object}
-  KEY_LOAD_TIMEOUT: 'keyLoadTimeOut'
+  KEY_LOAD_TIMEOUT: 'keyLoadTimeOut',
+  // Identifier for a buffer append error - data: append error description
+  BUFFER_APPEND_ERROR: 'bufferAppendError',
+  // Identifier for a buffer appending error event - data: appending error description
+  BUFFER_APPENDING_ERROR: 'bufferAppendingError'
 };
 exports.ErrorDetails = ErrorDetails;
 
@@ -5269,8 +5298,7 @@ var MP4Remuxer = (function () {
                 _utilsLogger.logger.log(delta + ' ms hole between AAC samples detected,filling it');
                 // set PTS to next PTS, and ensure PTS is greater or equal than last DTS
               } else if (delta < -1) {
-                  _utilsLogger.logger.log(-delta + ' ms overlapping between AAC samples detected, dropping it');
-                  continue;
+                  _utilsLogger.logger.log(-delta + ' ms overlapping between AAC samples detected');
                 }
               // set DTS to next DTS
               ptsnorm = dtsnorm = nextAacPts;

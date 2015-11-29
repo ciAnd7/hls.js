@@ -444,8 +444,11 @@ $(document).ready(function() {
           case Hls.ErrorDetails.FRAG_PARSING_ERROR:
             $("#HlsStatus").text("Parsing Error:" + data.reason);
             break;
-          case Hls.ErrorDetails.FRAG_APPENDING_ERROR:
-            $("#HlsStatus").text("Frag Appending Error");
+          case Hls.ErrorDetails.BUFFER_APPEND_ERROR:
+            $("#HlsStatus").text("Buffer Append Error");
+            break;
+          case Hls.ErrorDetails.BUFFER_APPENDING_ERROR:
+            $("#HlsStatus").text("Buffer Appending Error");
             break;
           case Hls.ErrorDetails.FRAG_LOOP_LOADING_ERROR:
             $("#HlsStatus").text("Frag Loop Loading Error");
@@ -505,6 +508,8 @@ $(document).ready(function() {
        video.addEventListener('seeked', handleVideoEvent);
        video.addEventListener('pause', handleVideoEvent);
        video.addEventListener('play', handleVideoEvent);
+       video.addEventListener('canplay', handleVideoEvent);
+       video.addEventListener('canplaythrough', handleVideoEvent);
        video.addEventListener('ended', handleVideoEvent);
        video.addEventListener('playing', handleVideoEvent);
        video.addEventListener('error', handleVideoEvent);
@@ -540,8 +545,8 @@ var lastSeekingIdx, lastStartPosition,lastDuration;
       //   data = 'duration:' + evt.target.duration + '/videoWidth:' + evt.target.videoWidth + '/videoHeight:' + evt.target.videoHeight;
       //  break;
       case 'loadeddata':
-      // case 'canplay':
-      // case 'canplaythrough':
+      case 'canplay':
+      case 'canplaythrough':
       case 'ended':
       case 'seeking':
       case 'seeked':
