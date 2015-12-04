@@ -229,7 +229,7 @@ class MSEMediaController {
                 /* we have no idea about which fragment should be loaded.
                    so let's load mid fragment. it will help computing playlist sliding and find the right one
                 */
-                frag = fragments[Math.round(fragLen / 2)];
+                frag = fragments[Math.min(fragLen - 1, Math.round(fragLen / 2))];
                 logger.log(`live playlist, switching playlist, unknown, load middle frag : ${frag.sn}`);
               }
             }
@@ -240,22 +240,23 @@ class MSEMediaController {
             }
           }
           if (!frag) {
-            if (bufferEnd > end) {
+            var foundFrag;
+            if (bufferEnd < end) {
+              foundFrag = BinarySearch.search(fragments, (candidate) => {
+                //logger.log('level/sn/sliding/start/end/bufEnd:${level}/${candidate.sn}/${sliding.toFixed(3)}/${candidate.start.toFixed(3)}/${(candidate.start+candidate.duration).toFixed(3)}/${bufferEnd.toFixed(3)}');
+                // offset should be within fragment boundary
+                if ((candidate.start + candidate.duration) <= bufferEnd) {
+                  return 1;
+                }
+                else if (candidate.start > bufferEnd) {
+                  return -1;
+                }
+                return 0;
+              });
+            } else {
               // reach end of playlist
-              break;
+              foundFrag = fragments[fragLen-1];
             }
-            let foundFrag = BinarySearch.search(fragments, (candidate) => {
-              //logger.log('level/sn/sliding/start/end/bufEnd:${level}/${candidate.sn}/${sliding.toFixed(3)}/${candidate.start.toFixed(3)}/${(candidate.start+candidate.duration).toFixed(3)}/${bufferEnd.toFixed(3)}');
-              // offset should be within fragment boundary
-              if ((candidate.start + candidate.duration) <= bufferEnd) {
-                return 1;
-              }
-              else if (candidate.start > bufferEnd) {
-                return -1;
-              }
-              return 0;
-            });
-
             if (foundFrag) {
               frag = foundFrag;
               start = foundFrag.start;
@@ -265,7 +266,19 @@ class MSEMediaController {
                   frag = fragments[frag.sn + 1 - levelDetails.startSN];
                   logger.log(`SN just loaded, load next one: ${frag.sn}`);
                 } else {
-                  // end of VOD playlist reached
+                  // have we reached end of VOD playlist ?
+                  if (!levelDetails.live) {
+                    var mediaSource = this.mediaSource;
+                    if (mediaSource && mediaSource.readyState === 'open') {
+                      // ensure sourceBuffer are not in updating stateyes
+                      var sb = this.sourceBuffer;
+                      if (!((sb.audio && sb.audio.updating) || (sb.video && sb.video.updating))) {
+                        logger.log('all media data available, signal endOfStream() to MediaSource');
+                        //Notify the media element that it now has all of the media data
+                        mediaSource.endOfStream();
+                      }
+                    }
+                  }
                   frag = null;
                 }
               }
@@ -1081,20 +1094,6 @@ class MSEMediaController {
         this.fragLastKbps = Math.round(8 * stats.length / (stats.tbuffered - stats.tfirst));
         this.hls.trigger(Event.FRAG_BUFFERED, {stats: stats, frag: frag});
         logger.log(`media buffered : ${this.timeRangesToString(this.media.buffered)}`);
-
-        // if stream is VOD (not live) and we reach End of Stream
-        var levelDetails = this.levels[this.level].details;
-        if (levelDetails && !levelDetails.live) {
-          // have we buffered last fragment ?
-          if (frag.sn === levelDetails.endSN) {
-            var mediaSource = this.mediaSource;
-            if (mediaSource && mediaSource.readyState === 'open') {
-              logger.log('all media data available, signal endOfStream() to MediaSource');
-              //Notify the media element that it now has all of the media data
-              mediaSource.endOfStream();
-            }
-          }
-        }
         this.state = State.IDLE;
       }
     }

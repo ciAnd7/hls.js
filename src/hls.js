@@ -44,6 +44,7 @@ class Hls {
       liveMaxLatencyDurationCount: Infinity,
       maxMaxBufferLength: 600,
       enableWorker: true,
+      enableSoftwareAES: true,
       fragLoadingTimeOut: 20000,
       fragLoadingMaxRetry: 1,
       fragLoadingRetryDelay: 1000,
@@ -94,8 +95,8 @@ class Hls {
 
   destroy() {
     logger.log('destroy');
-    this.detachMedia();
     this.trigger(Event.DESTROYING);
+    this.detachMedia();
     this.playlistLoader.destroy();
     this.fragmentLoader.destroy();
     this.levelController.destroy();
