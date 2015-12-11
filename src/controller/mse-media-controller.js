@@ -26,6 +26,7 @@ class MSEMediaController {
 
   constructor(hls) {
     this.config = hls.config;
+    this.audioCodecSwap = false;
     this.hls = hls;
     // Source Buffer listeners
     this.onsbue = this.onSBUpdateEnd.bind(this);
@@ -243,7 +244,7 @@ class MSEMediaController {
             var foundFrag;
             if (bufferEnd < end) {
               foundFrag = BinarySearch.search(fragments, (candidate) => {
-                //logger.log('level/sn/sliding/start/end/bufEnd:${level}/${candidate.sn}/${sliding.toFixed(3)}/${candidate.start.toFixed(3)}/${(candidate.start+candidate.duration).toFixed(3)}/${bufferEnd.toFixed(3)}');
+                //logger.log(`level/sn/start/end/bufEnd:${level}/${candidate.sn}/${candidate.start}/${(candidate.start+candidate.duration)}/${bufferEnd}`);
                 // offset should be within fragment boundary
                 if ((candidate.start + candidate.duration) <= bufferEnd) {
                   return 1;
@@ -270,7 +271,7 @@ class MSEMediaController {
                   if (!levelDetails.live) {
                     var mediaSource = this.mediaSource;
                     if (mediaSource && mediaSource.readyState === 'open') {
-                      // ensure sourceBuffer are not in updating stateyes
+                       // ensure sourceBuffer are not in updating states
                       var sb = this.sourceBuffer;
                       if (!((sb.audio && sb.audio.updating) || (sb.video && sb.video.updating))) {
                         logger.log('all media data available, signal endOfStream() to MediaSource');
@@ -511,7 +512,7 @@ class MSEMediaController {
       if ((pos + maxHoleDuration) >= start && pos < end) {
         // play position is inside this buffer TimeRange, retrieve end of buffer position and buffer length
         bufferStart = start;
-        bufferEnd = end;
+        bufferEnd = end + maxHoleDuration;
         bufferLen = bufferEnd - pos;
       } else if ((pos + maxHoleDuration) < start) {
         bufferStartNext = start;
@@ -780,8 +781,6 @@ class MSEMediaController {
     ms.addEventListener('sourceclose', this.onmsc);
     // link video and media Source
     media.src = URL.createObjectURL(ms);
-    // FIXME: this was in code before but onverror was never set! can be removed or fixed?
-    //media.addEventListener('error', this.onverror);
   }
 
   onMediaDetaching() {
@@ -806,7 +805,15 @@ class MSEMediaController {
     var ms = this.mediaSource;
     if (ms) {
       if (ms.readyState === 'open') {
-        ms.endOfStream();
+        try {
+          // endOfStream could trigger exception if any sourcebuffer is in updating state
+          // we don't really care about checking sourcebuffer state here,
+          // as we are anyway detaching the MediaSource
+          // let's just avoid this exception to propagate
+          ms.endOfStream();
+        } catch(err) {
+          logger.warn(`onMediaDetaching:${err.message} while calling endOfStream`);
+        }
       }
       ms.removeEventListener('sourceopen', this.onmso);
       ms.removeEventListener('sourceended', this.onmse);
@@ -979,9 +986,18 @@ class MSEMediaController {
             duration = details.totalduration,
             start = fragCurrent.start,
             level = fragCurrent.level,
-            sn = fragCurrent.sn;
+            sn = fragCurrent.sn,
+            audioCodec = currentLevel.audioCodec;
+        if(audioCodec && this.audioCodecSwap) {
+          logger.log('swapping playlist audio codec');
+          if(audioCodec.indexOf('mp4a.40.5') !==-1) {
+            audioCodec = 'mp4a.40.2';
+          } else {
+            audioCodec = 'mp4a.40.5';
+          }
+        }
         logger.log(`Demuxing ${sn} of [${details.startSN} ,${details.endSN}],level ${level}`);
-        this.demuxer.push(data.payload, currentLevel.audioCodec, currentLevel.videoCodec, start, fragCurrent.cc, level, sn, duration, fragCurrent.decryptdata);
+        this.demuxer.push(data.payload, audioCodec, currentLevel.videoCodec, start, fragCurrent.cc, level, sn, duration, fragCurrent.decryptdata);
       }
     }
   }
@@ -991,13 +1007,22 @@ class MSEMediaController {
       // check if codecs have been explicitely defined in the master playlist for this level;
       // if yes use these ones instead of the ones parsed from the demux
       var audioCodec = this.levels[this.level].audioCodec, videoCodec = this.levels[this.level].videoCodec, sb;
-      //logger.log('playlist level A/V codecs:' + audioCodec + ',' + videoCodec);
-      //logger.log('playlist codecs:' + codec);
+      if(audioCodec && this.audioCodecSwap) {
+        logger.log('swapping playlist audio codec');
+        if(audioCodec.indexOf('mp4a.40.5') !==-1) {
+          audioCodec = 'mp4a.40.2';
+        } else {
+          audioCodec = 'mp4a.40.5';
+        }
+      }
+      logger.log(`playlist_level/init_segment codecs: video => ${videoCodec}/${data.videoCodec}; audio => ${audioCodec}/${data.audioCodec}`);
       // if playlist does not specify codecs, use codecs found while parsing fragment
-      if (audioCodec === undefined || data.audiocodec === undefined) {
+      // if no codec found while parsing fragment, also set codec to undefined to avoid creating sourceBuffer
+      if (audioCodec === undefined || data.audioCodec === undefined) {
         audioCodec = data.audioCodec;
       }
-      if (videoCodec === undefined || data.videocodec === undefined) {
+
+      if (videoCodec === undefined  || data.videoCodec === undefined) {
         videoCodec = data.videoCodec;
       }
       // in case several audio codecs might be used, force HE-AAC for audio (some browsers don't support audio codec switch)
@@ -1076,7 +1101,7 @@ class MSEMediaController {
       case ErrorDetails.KEY_LOAD_ERROR:
       case ErrorDetails.KEY_LOAD_TIMEOUT:
         // if fatal error, stop processing, otherwise move to IDLE to retry loading
-        logger.warn(`buffer controller: ${data.details} while loading frag,switch to ${data.fatal ? 'ERROR' : 'IDLE'} state ...`);
+        logger.warn(`mediaController: ${data.details} while loading frag,switch to ${data.fatal ? 'ERROR' : 'IDLE'} state ...`);
         this.state = data.fatal ? State.ERROR : State.IDLE;
         break;
       default:
@@ -1105,7 +1130,6 @@ _checkBuffer() {
     if(media) {
       // compare readyState
       var readyState = media.readyState;
-      //logger.log(`readyState:${readyState}`);
       // if ready state different from HAVE_NOTHING (numeric value 0), we are allowed to seek
       if(readyState) {
         // if seek after buffered defined, let's seek if within acceptable range
@@ -1140,10 +1164,17 @@ _checkBuffer() {
     }
   }
 
+  swapAudioCodec() {
+    this.audioCodecSwap = !this.audioCodecSwap;
+  }
+
   onSBUpdateError(event) {
     logger.error(`sourceBuffer error:${event}`);
     this.state = State.ERROR;
-    this.hls.trigger(Event.ERROR, {type: ErrorTypes.MEDIA_ERROR, details: ErrorDetails.BUFFER_APPENDING_ERROR, fatal: true, frag: this.fragCurrent});
+    // according to http://www.w3.org/TR/media-source/#sourcebuffer-append-error
+    // this error might not always be fatal (it is fatal if decode error is set, in that case
+    // it will be followed by a mediaElement error ...)
+    this.hls.trigger(Event.ERROR, {type: ErrorTypes.MEDIA_ERROR, details: ErrorDetails.BUFFER_APPENDING_ERROR, fatal: false, frag: this.fragCurrent});
   }
 
   timeRangesToString(r) {
