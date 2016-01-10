@@ -15,11 +15,12 @@ const State = {
   IDLE : 0,
   KEY_LOADING : 1,
   FRAG_LOADING : 2,
-  WAITING_LEVEL : 3,
-  PARSING : 4,
-  PARSED : 5,
-  APPENDING : 6,
-  BUFFER_FLUSHING : 7
+  FRAG_LOADING_WAITING_RETRY : 3,
+  WAITING_LEVEL : 4,
+  PARSING : 5,
+  PARSED : 6,
+  APPENDING : 7,
+  BUFFER_FLUSHING : 8
 };
 
 class MSEMediaController {
@@ -28,6 +29,7 @@ class MSEMediaController {
     this.config = hls.config;
     this.audioCodecSwap = false;
     this.hls = hls;
+    this.ticks = 0;
     // Source Buffer listeners
     this.onsbue = this.onSBUpdateEnd.bind(this);
     this.onsbe  = this.onSBUpdateError.bind(this);
@@ -84,6 +86,7 @@ class MSEMediaController {
     this.demuxer = new Demuxer(hls);
     this.timer = setInterval(this.ontick, 100);
     this.level = -1;
+    this.fragLoadError = 0;
     hls.on(Event.FRAG_LOADED, this.onfl);
     hls.on(Event.FRAG_PARSING_INIT_SEGMENT, this.onis);
     hls.on(Event.FRAG_PARSING_DATA, this.onfpg);
@@ -136,6 +139,17 @@ class MSEMediaController {
   }
 
   tick() {
+    this.ticks++;
+    if (this.ticks === 1) {
+      this.doTick();
+      if (this.ticks > 1) {
+        setTimeout(this.tick, 1);
+      }
+      this.ticks = 0;
+    }
+  }
+
+  doTick() {
     var pos, level, levelDetails, hls = this.hls;
     switch(this.state) {
       case State.ERROR:
@@ -367,6 +381,17 @@ class MSEMediaController {
           }
         }
         break;
+      case State.FRAG_LOADING_WAITING_RETRY:
+        var now = performance.now();
+        var retryDate = this.retryDate;
+        var media = this.media;
+        var isSeeking = media && media.seeking;
+        // if current time is gt than retryDate, or if media seeking let's switch to IDLE state to retry loading
+        if(!retryDate || (now >= retryDate) || isSeeking) {
+          logger.log(`mediaController: retryDate reached, switch back to IDLE state`);
+          this.state = State.IDLE;
+        }
+        break;
       case State.PARSING:
         // nothing to do, wait for fragment being parsed
         break;
@@ -391,26 +416,30 @@ class MSEMediaController {
               this.appendError = 0;
             } catch(err) {
               // in case any error occured while appending, put back segment in mp4segments table
-              //logger.error(`error while trying to append buffer:${err.message},try appending later`);
+              logger.error(`error while trying to append buffer:${err.message},try appending later`);
               this.mp4segments.unshift(segment);
-              if (this.appendError) {
-                this.appendError++;
-              } else {
-                this.appendError = 1;
-              }
-              var event = {type: ErrorTypes.MEDIA_ERROR, details: ErrorDetails.BUFFER_APPEND_ERROR, frag: this.fragCurrent};
-              /* with UHD content, we could get loop of quota exceeded error until
-                browser is able to evict some data from sourcebuffer. retrying help recovering this
-              */
-              if (this.appendError > this.config.appendErrorMaxRetry) {
-                logger.log(`fail ${this.config.appendErrorMaxRetry} times to append segment in sourceBuffer`);
-                event.fatal = true;
-                hls.trigger(Event.ERROR, event);
-                this.state = State.ERROR;
-                return;
-              } else {
-                event.fatal = false;
-                hls.trigger(Event.ERROR, event);
+                // just discard QuotaExceededError for now, and wait for the natural browser buffer eviction
+              //http://www.w3.org/TR/html5/infrastructure.html#quotaexceedederror
+              if(err.code !== 22) {
+                if (this.appendError) {
+                  this.appendError++;
+                } else {
+                  this.appendError = 1;
+                }
+                var event = {type: ErrorTypes.MEDIA_ERROR, details: ErrorDetails.BUFFER_APPEND_ERROR, frag: this.fragCurrent};
+                /* with UHD content, we could get loop of quota exceeded error until
+                  browser is able to evict some data from sourcebuffer. retrying help recovering this
+                */
+                if (this.appendError > this.config.appendErrorMaxRetry) {
+                  logger.log(`fail ${this.config.appendErrorMaxRetry} times to append segment in sourceBuffer`);
+                  event.fatal = true;
+                  hls.trigger(Event.ERROR, event);
+                  this.state = State.ERROR;
+                  return;
+                } else {
+                  event.fatal = false;
+                  hls.trigger(Event.ERROR, event);
+                }
               }
             }
             this.state = State.APPENDING;
@@ -450,10 +479,10 @@ class MSEMediaController {
       default:
         break;
     }
-    // check/update current fragment
-    this._checkFragmentChanged();
     // check buffer
     this._checkBuffer();
+    // check/update current fragment
+    this._checkFragmentChanged();
   }
 
 
@@ -872,8 +901,12 @@ class MSEMediaController {
   }
 
   onMediaMetadata() {
-    if (this.media.currentTime !== this.startPosition) {
-      this.media.currentTime = this.startPosition;
+    var media = this.media,
+        currentTime = media.currentTime;
+    // only adjust currentTime if not equal to 0
+    if (!currentTime && currentTime !== this.startPosition) {
+      logger.log('onMediaMetadata: adjust currentTime to startPosition');
+      media.currentTime = this.startPosition;
     }
     this.loadedmetadata = true;
     this.tick();
@@ -1000,6 +1033,7 @@ class MSEMediaController {
         this.demuxer.push(data.payload, audioCodec, currentLevel.videoCodec, start, fragCurrent.cc, level, sn, duration, fragCurrent.decryptdata);
       }
     }
+    this.fragLoadError = 0;
   }
 
   onInitSegment(event, data) {
@@ -1065,7 +1099,7 @@ class MSEMediaController {
       this.tparse2 = Date.now();
       var level = this.levels[this.level],
           frag = this.fragCurrent;
-      logger.log(`parsed data, type/startPTS/endPTS/startDTS/endDTS/nb:${data.type}/${data.startPTS.toFixed(3)}/${data.endPTS.toFixed(3)}/${data.startDTS.toFixed(3)}/${data.endDTS.toFixed(3)}/${data.nb}`);
+      logger.log(`parsed ${data.type},PTS:[${data.startPTS.toFixed(3)},${data.endPTS.toFixed(3)}],DTS:[${data.startDTS.toFixed(3)}/${data.endDTS.toFixed(3)}],nb:${data.nb}`);
       var drift = LevelHelper.updateFragPTS(level.details,frag.sn,data.startPTS,data.endPTS);
       this.hls.trigger(Event.LEVEL_PTS_UPDATED, {details: level.details, level: this.level, drift: drift});
 
@@ -1092,9 +1126,34 @@ class MSEMediaController {
 
   onError(event, data) {
     switch(data.details) {
-      // abort fragment loading on errors
       case ErrorDetails.FRAG_LOAD_ERROR:
       case ErrorDetails.FRAG_LOAD_TIMEOUT:
+        if(!data.fatal) {
+          var loadError = this.fragLoadError;
+          if(loadError) {
+            loadError++;
+          } else {
+            loadError=1;
+          }
+          if (loadError <= this.config.fragLoadingMaxRetry) {
+            this.fragLoadError = loadError;
+            // reset load counter to avoid frag loop loading error
+            data.frag.loadCounter = 0;
+            // exponential backoff capped to 64s
+            var delay = Math.min(Math.pow(2,loadError-1)*this.config.fragLoadingRetryDelay,64000);
+            logger.warn(`mediaController: frag loading failed, retry in ${delay} ms`);
+            this.retryDate = performance.now() + delay;
+            // retry loading state
+            this.state = State.FRAG_LOADING_WAITING_RETRY;
+          } else {
+            logger.error(`mediaController: ${data.details} reaches max retry, redispatch as fatal ...`);
+            // redispatch same error but with fatal set to true
+            data.fatal = true;
+            this.hls.trigger(event, data);
+            this.state = State.ERROR;
+          }
+        }
+        break;
       case ErrorDetails.FRAG_LOOP_LOADING_ERROR:
       case ErrorDetails.LEVEL_LOAD_ERROR:
       case ErrorDetails.LEVEL_LOAD_TIMEOUT:
@@ -1139,24 +1198,35 @@ _checkBuffer() {
             media.currentTime = seekAfterBuffered;
             this.seekAfterBuffered = undefined;
           }
-        } else if(readyState < 3 ) {
-          // readyState = 1 or 2
-          //  HAVE_METADATA (numeric value 1)     Enough of the resource has been obtained that the duration of the resource is available.
-          //                                       The API will no longer throw an exception when seeking.
-          // HAVE_CURRENT_DATA (numeric value 2)  Data for the immediate current playback position is available,
-          //                                      but either not enough data is available that the user agent could
-          //                                      successfully advance the current playback position
-          var currentTime = media.currentTime;
-          var bufferInfo = this.bufferInfo(currentTime,0);
-          // check if current time is buffered or not
-          if(bufferInfo.len === 0) {
-            // no buffer available @ currentTime, check if next buffer is close (in a 300 ms range)
-            var nextBufferStart = bufferInfo.nextStart;
-            if(nextBufferStart && (nextBufferStart - currentTime < 0.3)) {
-              // next buffer is close ! adjust currentTime to nextBufferStart
-              // this will ensure effective video decoding
-              logger.log(`adjust currentTime from ${currentTime} to ${nextBufferStart}`);
-              media.currentTime = nextBufferStart;
+        } else {
+          var currentTime = media.currentTime,
+              bufferInfo = this.bufferInfo(currentTime,0),
+              isPlaying = !(media.paused || media.ended || media.seeking || readyState < 3),
+              jumpThreshold = 0.2;
+
+          // check buffer upfront
+          // if less than 200ms is buffered, and media is playing but playhead is not moving,
+          // and we have a new buffer range available upfront, let's seek to that one
+          if(bufferInfo.len <= jumpThreshold) {
+            if(currentTime > media.playbackRate*this.lastCurrentTime || !isPlaying) {
+              // playhead moving or media not playing
+              jumpThreshold = 0;
+            } else {
+              logger.trace('playback seems stuck');
+            }
+            // if we are below threshold, try to jump if next buffer range is close
+            if(bufferInfo.len <= jumpThreshold) {
+              // no buffer available @ currentTime, check if next buffer is close (more than 5ms diff but within a 300 ms range)
+              var nextBufferStart = bufferInfo.nextStart, delta = nextBufferStart-currentTime;
+              if(nextBufferStart &&
+                 (delta < 0.3) &&
+                 (delta > 0.005)  &&
+                 !media.seeking) {
+                // next buffer is close ! adjust currentTime to nextBufferStart
+                // this will ensure effective video decoding
+                logger.log(`adjust currentTime from ${currentTime} to ${nextBufferStart}`);
+                media.currentTime = nextBufferStart;
+              }
             }
           }
         }
