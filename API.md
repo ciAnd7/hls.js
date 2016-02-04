@@ -99,6 +99,7 @@ each error is categorized by :
     - ```Hls.ErrorDetails.FRAG_PARSING_ERROR```raised when fragment parsing fails
     - ```Hls.ErrorDetails.BUFFER_APPEND_ERROR```raised when exception is raised while preparing buffer append
     - ```Hls.ErrorDetails.BUFFER_APPENDING_ERROR```raised when exception is raised during buffer appending
+    - ```Hls.ErrorDetails.BUFFER_STALLED_ERROR```raised when playback stalls because the buffer runs out
   - its fatality:
     - ```false```if error is not fatal, hls.js will try to recover it
     - ```true```if error is fatal, an action is required to (try to) recover it.
@@ -183,9 +184,12 @@ configuration parameters could be provided to hls.js upon instantiation of Hls O
    var config = {
       debug : false,
       autoStartLoad : true,
+      defaultAudioCodec : undefined,
       maxBufferLength : 30,
       maxMaxBufferLength : 600,
       maxBufferSize : 60*1000*1000,
+      maxBufferHole : 0.3,
+      maxSeekHole : 2,
       liveSyncDurationCount : 3,
       liveMaxLatencyDurationCount: 10,
       enableWorker : true,
@@ -206,7 +210,9 @@ configuration parameters could be provided to hls.js upon instantiation of Hls O
       fLoader: customFragmentLoader,
       pLoader: customPlaylistLoader,
       xhrSetup : XMLHttpRequestSetupCallback,
-      abrController : customAbrController
+      abrController : customAbrController,
+      timelineController: TimelineController,
+      enableCEA708Captions: true
     };
 
 
@@ -229,6 +235,15 @@ a logger object could also be provided for custom logging : ```config.debug=cust
  - if set to true, start level playlist and first fragments will be loaded automatically, after triggering of ```Hls.Events.MANIFEST_PARSED``` event
  - if set to false, an explicit API call (```hls.startLoad()```) will be needed to start quality level/fragment loading.
 
+#### ```defaultAudioCodec```
+(default undefined)
+
+ if audio codec is not signaled in variant manifest, or if only a stream manifest is provided, hls.js tries to guess audio codec by parsing audio sampling rate in ADTS header. if sampling rate is less or equal than 22050 Hz, then hls.js assumes it is HE-AAC, otherwise it assumes it is AAC-LC. This could result in bad guess, leading to audio decode error, ending up in media error.
+ it is possible to hint default audiocodec to hls.js by configuring this value as below:
+  - ```mp4a.40.2``` (AAC-LC) or 
+  - ```mp4a.40.5``` (HE-AAC) or
+  - ```undefined``` (guess based on sampling rate)
+
 #### ```maxBufferLength```
 (default 30s)
 
@@ -239,6 +254,20 @@ this is the guaranteed buffer length hls.js will try to reach, regardless of max
 (default 60 MB)
 
 'minimum' maximum buffer size in bytes. if buffer size upfront is bigger than this value, no fragment will be loaded.
+
+#### ```maxBufferHole```
+(default 0.3s)
+
+'maximum' inter-fragment buffer hole tolerance that hls.js can cope with.
+When switching between quality level, fragments might not be perfectly aligned.
+This could result in small overlapping or hole in media buffer. This tolerance factor helps cope with this.
+
+#### ```maxSeekHole```
+(default 2s)
+
+in case playback is stalled, and a buffered range is available upfront, less than maxSeekHole seconds from current media position,
+hls.js will jump over this buffer hole to reach the beginning of this following buffered range.
+```maxSeekHole``` allows to configure this jumpable threshold.
 
 #### ```maxMaxBufferLength```
 (default 600s)
@@ -386,6 +415,21 @@ parameter should be a class providing 2 getter/setters and a destroy() method:
  - get/set autoLevelCapping : get/set : capping/max level value that could be used by ABR Controller
  - destroy() : should clean-up all used resources
 
+#### ```timelineController```
+(default : internal track timeline controller)
+
+customized text track syncronization controller
+
+parameter should be a class a destroy() method:
+
+ - destroy() : should clean-up all used resources
+
+#### ```enableCEA708Captions```
+(default : true)
+
+whether or not to enable CEA-708 captions
+
+parameter should be a boolean
 
 ## Video Binding/Unbinding API
 
@@ -499,7 +543,7 @@ full list of Events available below :
   - `Hls.Events.LEVEL_PTS_UPDATED`  - fired when a level's PTS information has been updated after parsing a fragment
     -  data: { details : levelDetails object, level : id of updated level, drift: PTS drift observed when parsing last fragment }
   - `Hls.Events.LEVEL_SWITCH`  - fired when a level switch is requested
-    -  data: { levelId : id of new level }
+    -  data: { level : id of new level, it is the index of the array `Hls.levels` }
   - `Hls.Events.KEY_LOADING`  - fired when a decryption key loading starts
     -  data: { frag : fragment object}
   - `Hls.Events.KEY_LOADED`  - fired when a decryption key loading is completed

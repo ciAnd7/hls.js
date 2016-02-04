@@ -3,35 +3,29 @@
 */
 
 import Event from '../events';
+import EventHandler from '../event-handler';
 import {logger} from '../utils/logger';
 import {ErrorTypes, ErrorDetails} from '../errors';
 
-class LevelController {
+class LevelController extends EventHandler {
 
   constructor(hls) {
-    this.hls = hls;
-    this.onml = this.onManifestLoaded.bind(this);
-    this.onll = this.onLevelLoaded.bind(this);
-    this.onerr = this.onError.bind(this);
+    super(hls,
+      Event.MANIFEST_LOADED,
+      Event.LEVEL_LOADED,
+      Event.ERROR);
     this.ontick = this.tick.bind(this);
-    hls.on(Event.MANIFEST_LOADED, this.onml);
-    hls.on(Event.LEVEL_LOADED, this.onll);
-    hls.on(Event.ERROR, this.onerr);
     this._manualLevel = this._autoLevelCapping = -1;
   }
 
   destroy() {
-    var hls = this.hls;
-    hls.off(Event.MANIFEST_LOADED, this.onml);
-    hls.off(Event.LEVEL_LOADED, this.onll);
-    hls.off(Event.ERROR, this.onerr);
     if (this.timer) {
      clearInterval(this.timer);
     }
     this._manualLevel = -1;
   }
 
-  onManifestLoaded(event, data) {
+  onManifestLoaded(data) {
     var levels0 = [], levels = [], bitrateStart, i, bitrateSet = {}, videoCodecFound = false, audioCodecFound = false, hls = this.hls;
 
     // regroup redundant level together
@@ -66,11 +60,12 @@ class LevelController {
 
     // only keep level with supported audio/video codecs
     levels = levels.filter(function(level) {
-      var checkSupported = function(codec) { return MediaSource.isTypeSupported(`video/mp4;codecs=${codec}`);};
+      var checkSupportedAudio = function(codec) { return MediaSource.isTypeSupported(`audio/mp4;codecs=${codec}`);};
+      var checkSupportedVideo = function(codec) { return MediaSource.isTypeSupported(`video/mp4;codecs=${codec}`);};
       var audioCodec = level.audioCodec, videoCodec = level.videoCodec;
 
-      return (!audioCodec || checkSupported(audioCodec)) &&
-             (!videoCodec || checkSupported(videoCodec));
+      return (!audioCodec || checkSupportedAudio(audioCodec)) &&
+             (!videoCodec || checkSupportedVideo(videoCodec));
     });
 
     if(levels.length) {
@@ -166,7 +161,7 @@ class LevelController {
     this._startLevel = newLevel;
   }
 
-  onError(event, data) {
+  onError(data) {
     if(data.fatal) {
       return;
     }
@@ -224,7 +219,7 @@ class LevelController {
     }
   }
 
-  onLevelLoaded(event, data) {
+  onLevelLoaded(data) {
     // check if current playlist is a live playlist
     if (data.details.live && !this.timer) {
       // if live playlist we will have to reload it periodically
